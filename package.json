@@ -6,7 +6,7 @@
   "author": "Universal Downloader Team",
   "license": "MIT",
   "scripts": {
-    "build:main": "esbuild src/main/index.ts src/main/preload.ts --bundle --platform=node --target=node20 --external:electron --packages=external --outdir=dist/main",
+    "build:main": "esbuild src/main/index.ts src/main/preload.ts --bundle --platform=node --target=node20 --external:electron --external:ffmpeg-static --outdir=dist/main",
     "build:renderer": "vite build",
     "build": "npm run build:main && npm run build:renderer",
     "build:win": "npm run build && electron-builder --win nsis",
