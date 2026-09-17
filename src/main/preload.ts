@@ -68,6 +68,8 @@ const api: IpcApi = {
   },
   hasCompletedOnboarding: () => ipcRenderer.invoke(IPC_CHANNELS.STORE_GET_ONBOARDING),
   setOnboardingCompleted: () => ipcRenderer.invoke(IPC_CHANNELS.STORE_SET_ONBOARDING),
+  openLogFile: () => ipcRenderer.invoke(IPC_CHANNELS.LOGS_OPEN),
+  getLogPath: () => ipcRenderer.invoke(IPC_CHANNELS.LOGS_GET_PATH),
 };
 
 contextBridge.exposeInMainWorld('api', api);

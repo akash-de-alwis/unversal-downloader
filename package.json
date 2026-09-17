@@ -29,6 +29,15 @@
       "dist/**/*",
       "assets/**/*"
     ],
+    "extraResources": [
+      {
+        "from": "bin",
+        "to": "bin",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
     "publish": {
       "provider": "github",
       "owner": "universal-downloader",

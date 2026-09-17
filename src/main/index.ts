@@ -9,7 +9,13 @@ import type {
 } from '../shared/types';
 import { downloadManager } from './download-manager';
 import { queueManager } from './queue-manager';
-import { setupErrorLogging, logger, generateDiagnosticsReport } from './logger';
+import {
+  setupErrorLogging,
+  logger,
+  generateDiagnosticsReport,
+  getLogFilePath,
+  openLogFileInExplorer,
+} from './logger';
 import { appUpdater } from './updater';
 
 // Initialize file & crash logger immediately
@@ -132,6 +138,15 @@ function setupIpcHandlers(): void {
 
   ipcMain.handle(IPC_CHANNELS.STORE_SET_ONBOARDING, async () => {
     queueManager.updateSettings({ hasCompletedOnboarding: true });
+  });
+
+  ipcMain.handle(IPC_CHANNELS.LOGS_OPEN, async () => {
+    logger.info('Opening log file in explorer on user request');
+    return openLogFileInExplorer();
+  });
+
+  ipcMain.handle(IPC_CHANNELS.LOGS_GET_PATH, async () => {
+    return getLogFilePath();
   });
 
   // Folder & Utility Handlers

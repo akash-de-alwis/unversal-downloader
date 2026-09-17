@@ -280,7 +280,23 @@ export const App: React.FC = () => {
       console.error('Fetch error:', err);
       const raw = err?.message || String(err);
       let friendly = 'Could not retrieve video information. Please check the URL and internet connection.';
-      if (raw.includes('Unsupported URL')) {
+      if (raw.includes('timed out') || raw.includes('timeout')) {
+        friendly =
+          'Analysis timed out after 30 seconds. The yt-dlp media engine did not respond in time (it may be blocked by Windows Defender/antivirus, stalled by a network firewall, or rate-limited).';
+      } else if (raw.includes('quarantined') || raw.includes('removed')) {
+        friendly =
+          'The media extraction engine (yt-dlp) was quarantined or deleted by Windows Defender / antivirus. Please restore or exclude it in Windows Security.';
+      } else if (
+        raw.includes('blocked by Windows Defender') ||
+        raw.includes('EPERM') ||
+        raw.includes('EACCES')
+      ) {
+        friendly =
+          'Execution was blocked by Windows Defender or security permissions. Please add an exclusion for Universal Downloader in your antivirus settings.';
+      } else if (raw.includes('locked by another process') || raw.includes('EBUSY')) {
+        friendly =
+          'The media engine is currently locked by a system scan. Please wait a few moments and try again.';
+      } else if (raw.includes('Unsupported URL')) {
         friendly = 'The provided URL is not supported or recognized as a valid media link.';
       } else if (raw.includes('Private video')) {
         friendly = 'This video is private or requires authentication.';
@@ -630,13 +646,39 @@ export const App: React.FC = () => {
                     <h3 className="error-title">Extraction Error</h3>
                     <p className="error-message">{errorMessage}</p>
 
-                    {rawErrorDetails && (
-                      <div>
+                    <div
+                      style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '10px',
+                        flexWrap: 'wrap',
+                        marginTop: '10px',
+                      }}
+                    >
+                      <button
+                        id="btn-open-log-file"
+                        type="button"
+                        className="error-details-toggle"
+                        onClick={async () => {
+                          try {
+                            await window.api.openLogFile();
+                          } catch (e) {
+                            console.error('Could not open log file:', e);
+                          }
+                        }}
+                        style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}
+                      >
+                        <FolderOpen size={14} />
+                        <span>Open Log File</span>
+                      </button>
+
+                      {rawErrorDetails && (
                         <button
                           id="btn-toggle-error-details"
                           type="button"
                           className="error-details-toggle"
                           onClick={() => setShowErrorDetails(!showErrorDetails)}
+                          style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}
                         >
                           {showErrorDetails ? (
                             <>
@@ -650,12 +692,12 @@ export const App: React.FC = () => {
                             </>
                           )}
                         </button>
+                      )}
+                    </div>
 
-                        {showErrorDetails && (
-                          <div className="error-details-box" id="error-details-content">
-                            {rawErrorDetails}
-                          </div>
-                        )}
+                    {rawErrorDetails && showErrorDetails && (
+                      <div className="error-details-box" id="error-details-content">
+                        {rawErrorDetails}
                       </div>
                     )}
                   </div>
@@ -1140,24 +1182,41 @@ export const App: React.FC = () => {
                     Export system metadata and logs to clipboard for bug reporting and support
                   </span>
                 </div>
-                <button
-                  id="btn-copy-diagnostics"
-                  type="button"
-                  className="btn-secondary"
-                  onClick={handleCopyDiagnostics}
-                >
-                  {copiedDiagnostics ? (
-                    <>
-                      <CheckCircle2 size={14} color="var(--success-text)" />
-                      <span style={{ color: 'var(--success-text)' }}>Diagnostics Copied!</span>
-                    </>
-                  ) : (
-                    <>
-                      <Copy size={14} />
-                      <span>Copy Diagnostics</span>
-                    </>
-                  )}
-                </button>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <button
+                    id="btn-open-log-file-settings"
+                    type="button"
+                    className="btn-secondary"
+                    onClick={async () => {
+                      try {
+                        await window.api.openLogFile();
+                      } catch (e) {
+                        console.error('Could not open log file:', e);
+                      }
+                    }}
+                  >
+                    <FolderOpen size={14} />
+                    <span>Open Log File</span>
+                  </button>
+                  <button
+                    id="btn-copy-diagnostics"
+                    type="button"
+                    className="btn-secondary"
+                    onClick={handleCopyDiagnostics}
+                  >
+                    {copiedDiagnostics ? (
+                      <>
+                        <CheckCircle2 size={14} color="var(--success-text)" />
+                        <span style={{ color: 'var(--success-text)' }}>Diagnostics Copied!</span>
+                      </>
+                    ) : (
+                      <>
+                        <Copy size={14} />
+                        <span>Copy Diagnostics</span>
+                      </>
+                    )}
+                  </button>
+                </div>
               </div>
 
               {/* Auto Updates */}

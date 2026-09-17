@@ -1,5 +1,6 @@
 import log from 'electron-log/main';
-import { app } from 'electron';
+import { app, shell } from 'electron';
+import path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';
 import { downloadManager } from './download-manager';
@@ -12,6 +13,33 @@ log.transports.console.level = 'debug';
 
 export const logger = log;
 
+export function getLogFilePath(): string {
+  try {
+    return log.transports.file.getFile().path;
+  } catch {
+    return path.join(app.getPath('userData'), 'logs', 'main.log');
+  }
+}
+
+export function openLogFileInExplorer(): boolean {
+  const filePath = getLogFilePath();
+  try {
+    if (fs.existsSync(filePath)) {
+      shell.showItemInFolder(filePath);
+      return true;
+    } else {
+      const dir = path.dirname(filePath);
+      if (fs.existsSync(dir)) {
+        shell.openPath(dir);
+        return true;
+      }
+    }
+  } catch (err) {
+    logger.error('Failed to open log file in explorer:', err);
+  }
+  return false;
+}
+
 export function setupErrorLogging(): void {
   process.on('uncaughtException', (error) => {
     logger.error('Unhandled Exception caught in main process:', error);
@@ -22,6 +50,7 @@ export function setupErrorLogging(): void {
   });
 
   logger.info('Logger initialized for Universal Downloader v' + app.getVersion());
+  logger.info('Log file location:', getLogFilePath());
 }
 
 export interface DiagnosticsReport {

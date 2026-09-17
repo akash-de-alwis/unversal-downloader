@@ -3,6 +3,7 @@ import path from 'node:path';
 import fs from 'node:fs';
 import YTDlpWrap from 'yt-dlp-wrap';
 import ffmpegPath from 'ffmpeg-static';
+import { logger } from './logger';
 import type {
   VideoMetadata,
   VideoFormat,
@@ -46,7 +47,10 @@ export class DownloadManager {
 
   public initialize(): Promise<void> {
     if (!this.initPromise) {
-      this.initPromise = this.doInitialize();
+      this.initPromise = this.doInitialize().catch((err) => {
+        this.initPromise = null; // Reset so subsequent attempts can retry
+        throw err;
+      });
     }
     return this.initPromise;
   }
@@ -54,6 +58,10 @@ export class DownloadManager {
   private async doInitialize(): Promise<void> {
     const isWin = process.platform === 'win32';
     const binaryName = isWin ? 'yt-dlp.exe' : 'yt-dlp';
+
+    logger.info(
+      `[DownloadManager] Initializing yt-dlp engine on platform=${process.platform}, arch=${process.arch}...`
+    );
 
     // Cache in app's userData directory
     const userDataPath = app.getPath('userData');
@@ -65,53 +73,93 @@ export class DownloadManager {
     this.binaryPath = path.join(binDir, binaryName);
 
     // Check if binary already exists and is valid (> 5MB)
-    const exists = fs.existsSync(this.binaryPath);
     let needsDownload = true;
-
-    if (exists) {
+    if (fs.existsSync(this.binaryPath)) {
       try {
         const stats = fs.statSync(this.binaryPath);
         if (stats.size > 5 * 1024 * 1024) {
           needsDownload = false;
+          logger.info(
+            `[DownloadManager] Found cached yt-dlp binary at: "${this.binaryPath}" (${(stats.size / (1024 * 1024)).toFixed(1)} MB)`
+          );
+        } else {
+          logger.warn(
+            `[DownloadManager] Existing yt-dlp binary is incomplete (${stats.size} bytes). Re-acquiring.`
+          );
         }
       } catch (err) {
-        console.warn('Error checking existing yt-dlp binary:', err);
+        logger.warn(`[DownloadManager] Error checking existing yt-dlp binary:`, err);
       }
     }
 
-    // Check if a local project bin exists as fallback
+    // Check fallback locations for pre-bundled binary (installer extraResources, process.resourcesPath, cwd)
     if (needsDownload) {
-      const devBinPath = path.resolve(process.cwd(), 'bin', binaryName);
-      if (fs.existsSync(devBinPath)) {
-        try {
-          fs.copyFileSync(devBinPath, this.binaryPath);
-          needsDownload = false;
-          console.log(`Copied cached yt-dlp binary from ${devBinPath} to ${this.binaryPath}`);
-        } catch (copyErr) {
-          console.warn('Failed to copy dev binary:', copyErr);
+      const candidatePaths = [
+        path.join(process.resourcesPath, 'bin', binaryName),
+        path.join(process.resourcesPath, binaryName),
+        path.resolve(process.cwd(), 'bin', binaryName),
+        path.join(app.getAppPath(), 'bin', binaryName),
+      ];
+
+      for (const candidate of candidatePaths) {
+        logger.info(`[DownloadManager] Checking candidate binary path: "${candidate}"`);
+        if (fs.existsSync(candidate)) {
+          try {
+            const stats = fs.statSync(candidate);
+            if (stats.size > 5 * 1024 * 1024) {
+              fs.copyFileSync(candidate, this.binaryPath);
+              needsDownload = false;
+              logger.info(
+                `[DownloadManager] Successfully copied pre-bundled yt-dlp from "${candidate}" to "${this.binaryPath}" (${(stats.size / (1024 * 1024)).toFixed(1)} MB)`
+              );
+              break;
+            }
+          } catch (copyErr) {
+            logger.warn(`[DownloadManager] Failed copying candidate "${candidate}":`, copyErr);
+          }
         }
       }
     }
 
     if (needsDownload) {
-      console.log(`Downloading latest official yt-dlp release binary into ${this.binaryPath}...`);
-      await YTDlpWrap.downloadFromGithub(this.binaryPath);
-      if (!isWin) {
-        try {
-          fs.chmodSync(this.binaryPath, 0o755);
-        } catch (e) {
-          console.warn('chmod failed on yt-dlp binary:', e);
+      logger.info(
+        `[DownloadManager] No local or bundled binary found. Downloading latest official release into "${this.binaryPath}"...`
+      );
+      try {
+        await Promise.race([
+          YTDlpWrap.downloadFromGithub(this.binaryPath),
+          new Promise((_, reject) =>
+            setTimeout(() => reject(new Error('GitHub download timed out after 60 seconds')), 60000)
+          ),
+        ]);
+        if (!isWin) {
+          try {
+            fs.chmodSync(this.binaryPath, 0o755);
+          } catch (e) {
+            logger.warn(`[DownloadManager] chmod failed on yt-dlp binary:`, e);
+          }
         }
+        logger.info(`[DownloadManager] yt-dlp binary successfully downloaded from GitHub.`);
+      } catch (dlErr: any) {
+        logger.error(`[DownloadManager] Failed to download yt-dlp binary from GitHub:`, dlErr);
+        throw new Error(`Failed to download yt-dlp media engine: ${dlErr?.message || dlErr}`);
       }
-      console.log('yt-dlp binary successfully downloaded and cached in userData.');
     }
 
     this.ytDlp = new YTDlpWrap(this.binaryPath);
     try {
       const version = await this.ytDlp.getVersion();
-      console.log(`yt-dlp initialized successfully (version: ${version.trim()})`);
-    } catch (verErr) {
-      console.warn('Could not verify yt-dlp version:', verErr);
+      logger.info(
+        `[DownloadManager] yt-dlp engine verified (version: ${version.trim()}, binary: "${this.binaryPath}")`
+      );
+    } catch (verErr: any) {
+      logger.warn(`[DownloadManager] Could not verify yt-dlp version on init:`, verErr);
+      const msg = verErr?.message || String(verErr);
+      if (msg.includes('EACCES') || msg.includes('EPERM')) {
+        logger.error(
+          `[DownloadManager] Execution permission error! Windows Defender or security software may be blocking: "${this.binaryPath}"`
+        );
+      }
     }
   }
 
@@ -127,7 +175,10 @@ export class DownloadManager {
     return this.ytDlp;
   }
 
-  public async fetchInfo(url: string): Promise<VideoMetadata> {
+  public async fetchInfo(url: string, timeoutMs: number = 30000): Promise<VideoMetadata> {
+    const startTime = Date.now();
+    logger.info(`[fetchInfo] Starting info extraction for URL: "${url}" (timeout: ${timeoutMs}ms)`);
+
     const yt = await this.ensureInitialized();
 
     const args = ['--dump-json', '--no-warnings', '--no-playlist'];
@@ -136,73 +187,189 @@ export class DownloadManager {
     }
     args.push(url);
 
-    const stdout = await yt.execPromise(args);
-    const raw = JSON.parse(stdout);
-
-    const formats: VideoFormat[] = [];
-    const seenFormats = new Set<string>();
-
-    if (Array.isArray(raw.formats)) {
-      for (const f of raw.formats) {
-        if (!f.format_id || seenFormats.has(f.format_id)) continue;
-        seenFormats.add(f.format_id);
-
-        const hasVideo = f.vcodec && f.vcodec !== 'none';
-        const hasAudio = f.acodec && f.acodec !== 'none';
-        const resolution =
-          f.resolution ||
-          (f.width && f.height ? `${f.width}x${f.height}` : hasVideo ? 'video' : 'audio only');
-
-        const filesize = f.filesize || f.filesize_approx || undefined;
-
-        formats.push({
-          formatId: f.format_id,
-          resolution,
-          ext: f.ext || 'mp4',
-          filesize,
-          filesizeFormatted: filesize ? this.formatBytes(filesize) : undefined,
-          note: f.format_note || f.format || undefined,
-          fps: f.fps || undefined,
-          hasVideo: Boolean(hasVideo),
-          hasAudio: Boolean(hasAudio),
-        });
-      }
+    // Pre-flight check: does binary still exist?
+    if (!fs.existsSync(this.binaryPath)) {
+      const msg = `yt-dlp binary missing at "${this.binaryPath}". It may have been deleted or quarantined by Windows Defender/antivirus.`;
+      logger.error(`[fetchInfo] ${msg}`);
+      throw new Error(msg);
     }
 
-    // Sort formats: video formats by height/resolution, then audio
-    formats.sort((a, b) => {
-      const getResNumber = (res: string) => {
-        const m = res.match(/(\d+)x(\d+)/);
-        if (m) return parseInt(m[2], 10);
-        const p = res.match(/(\d+)p/);
-        if (p) return parseInt(p[1], 10);
-        return a.hasVideo ? 1 : 0;
-      };
-      return getResNumber(a.resolution) - getResNumber(b.resolution);
+    try {
+      const stats = fs.statSync(this.binaryPath);
+      logger.info(
+        `[fetchInfo] Using binary: "${this.binaryPath}" (${(stats.size / (1024 * 1024)).toFixed(1)} MB), FFmpeg: "${this.ffmpegBinaryPath || 'none'}"`
+      );
+    } catch (statErr) {
+      logger.warn(`[fetchInfo] Could not read binary stat:`, statErr);
+    }
+
+    logger.info(`[fetchInfo] Command arguments: ${args.join(' ')}`);
+
+    const abortController = new AbortController();
+    let isTimedOut = false;
+    let timeoutTimer: NodeJS.Timeout | null = null;
+
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      timeoutTimer = setTimeout(() => {
+        isTimedOut = true;
+        logger.error(
+          `[fetchInfo] Operation timed out after ${timeoutMs}ms for URL: "${url}". Triggering abort signal...`
+        );
+        abortController.abort();
+        reject(
+          new Error(
+            `Analysis timed out after ${Math.round(timeoutMs / 1000)} seconds. The media extraction engine (yt-dlp) did not respond in time. ` +
+            `This can occur if Windows Defender or antivirus is scanning/blocking the engine, a network firewall stalled the connection, or YouTube rate-limited requests.`
+          )
+        );
+      }, timeoutMs);
     });
 
-    const videoFormats = formats.filter((f) => f.hasVideo);
-    if (videoFormats.length > 0) {
-      videoFormats[0].isLowestQuality = true;
-      videoFormats[videoFormats.length - 1].isHighestQuality = true;
+    let execPromise: ReturnType<YTDlpWrap['execPromise']>;
+    try {
+      execPromise = yt.execPromise(args, {}, abortController.signal);
+      const childProc = execPromise.ytDlpProcess;
+      logger.info(`[fetchInfo] Spawned yt-dlp child process (PID: ${childProc?.pid || 'pending'})`);
+
+      const stdout = await Promise.race([execPromise, timeoutPromise]);
+      const durationMs = Date.now() - startTime;
+      logger.info(
+        `[fetchInfo] Success in ${durationMs}ms (PID: ${childProc?.pid || 'unknown'}). Stdout size: ${stdout.length} bytes.`
+      );
+
+      const raw = JSON.parse(stdout);
+
+      const formats: VideoFormat[] = [];
+      const seenFormats = new Set<string>();
+
+      if (Array.isArray(raw.formats)) {
+        for (const f of raw.formats) {
+          if (!f.format_id || seenFormats.has(f.format_id)) continue;
+          seenFormats.add(f.format_id);
+
+          const hasVideo = f.vcodec && f.vcodec !== 'none';
+          const hasAudio = f.acodec && f.acodec !== 'none';
+          const resolution =
+            f.resolution ||
+            (f.width && f.height ? `${f.width}x${f.height}` : hasVideo ? 'video' : 'audio only');
+
+          const filesize = f.filesize || f.filesize_approx || undefined;
+
+          formats.push({
+            formatId: f.format_id,
+            resolution,
+            ext: f.ext || 'mp4',
+            filesize,
+            filesizeFormatted: filesize ? this.formatBytes(filesize) : undefined,
+            note: f.format_note || f.format || undefined,
+            fps: f.fps || undefined,
+            hasVideo: Boolean(hasVideo),
+            hasAudio: Boolean(hasAudio),
+          });
+        }
+      }
+
+      // Sort formats: video formats by height/resolution, then audio
+      formats.sort((a, b) => {
+        const getResNumber = (res: string) => {
+          const m = res.match(/(\d+)x(\d+)/);
+          if (m) return parseInt(m[2], 10);
+          const p = res.match(/(\d+)p/);
+          if (p) return parseInt(p[1], 10);
+          return a.hasVideo ? 1 : 0;
+        };
+        return getResNumber(a.resolution) - getResNumber(b.resolution);
+      });
+
+      const videoFormats = formats.filter((f) => f.hasVideo);
+      if (videoFormats.length > 0) {
+        videoFormats[0].isLowestQuality = true;
+        videoFormats[videoFormats.length - 1].isHighestQuality = true;
+      }
+
+      const duration = typeof raw.duration === 'number' ? raw.duration : 0;
+      const thumbnail =
+        raw.thumbnail ||
+        (Array.isArray(raw.thumbnails) && raw.thumbnails.length > 0
+          ? raw.thumbnails[raw.thumbnails.length - 1].url
+          : '');
+
+      return {
+        title: raw.title || 'Untitled Media',
+        thumbnail: thumbnail || '',
+        duration,
+        durationFormatted: this.formatSeconds(duration),
+        uploader: raw.uploader || raw.channel || raw.uploader_id || 'Unknown',
+        formats,
+        webpageUrl: raw.webpage_url || url,
+      };
+    } catch (err: any) {
+      const durationMs = Date.now() - startTime;
+      if (timeoutTimer) clearTimeout(timeoutTimer);
+
+      if (isTimedOut) {
+        throw err;
+      }
+
+      const errMsg = err?.message || String(err);
+      const errCode = err?.code;
+      const isStillPresent = fs.existsSync(this.binaryPath);
+
+      logger.error(
+        `[fetchInfo] Extraction failed after ${durationMs}ms. ErrorCode: ${errCode || 'none'}, BinaryExists: ${isStillPresent}. Error: ${errMsg}`
+      );
+
+      if (err?.stderr) {
+        logger.error(`[fetchInfo] Stderr output: ${err.stderr}`);
+      }
+
+      if (!isStillPresent) {
+        const quarantineMsg =
+          `The yt-dlp binary was removed or quarantined by Windows Defender/antivirus during execution: "${this.binaryPath}". ` +
+          `Please check Windows Security -> Protection history and restore or exclude the Universal Downloader folder.`;
+        logger.error(`[fetchInfo] ${quarantineMsg}`);
+        throw new Error(quarantineMsg);
+      }
+
+      if (
+        errMsg.includes('EPERM') ||
+        errMsg.includes('EACCES') ||
+        errMsg.includes('spawn EACCES') ||
+        errMsg.includes('spawn EPERM')
+      ) {
+        const permMsg =
+          `Execution was blocked by Windows Defender, antivirus, or system permissions (EPERM/EACCES) for: "${this.binaryPath}". ` +
+          `Please add an exclusion in Windows Security for Universal Downloader.`;
+        logger.error(`[fetchInfo] ${permMsg}`);
+        throw new Error(permMsg);
+      }
+
+      if (errMsg.includes('EBUSY')) {
+        const busyMsg =
+          `The yt-dlp executable is locked by another process (likely Windows Defender/antivirus real-time scan). ` +
+          `Please wait a few seconds and try again.`;
+        logger.error(`[fetchInfo] ${busyMsg}`);
+        throw new Error(busyMsg);
+      }
+
+      if (errMsg.includes('3221225477') || errMsg.includes('0xC0000005')) {
+        const avCrashMsg =
+          `yt-dlp process terminated unexpectedly with code 0xC0000005 (Access Violation). ` +
+          `This typically occurs when Windows Defender Exploit Guard or third-party antivirus forcefully blocks execution.`;
+        logger.error(`[fetchInfo] ${avCrashMsg}`);
+        throw new Error(avCrashMsg);
+      }
+
+      if (errMsg.includes('3221225786') || errMsg.includes('0xC000013A')) {
+        const ctrlCMsg = `yt-dlp process was forcefully closed or cancelled (0xC000013A).`;
+        logger.error(`[fetchInfo] ${ctrlCMsg}`);
+        throw new Error(ctrlCMsg);
+      }
+
+      throw err;
+    } finally {
+      if (timeoutTimer) clearTimeout(timeoutTimer);
     }
-
-    const duration = typeof raw.duration === 'number' ? raw.duration : 0;
-    const thumbnail =
-      raw.thumbnail ||
-      (Array.isArray(raw.thumbnails) && raw.thumbnails.length > 0
-        ? raw.thumbnails[raw.thumbnails.length - 1].url
-        : '');
-
-    return {
-      title: raw.title || 'Untitled Media',
-      thumbnail: thumbnail || '',
-      duration,
-      durationFormatted: this.formatSeconds(duration),
-      uploader: raw.uploader || raw.channel || raw.uploader_id || 'Unknown',
-      formats,
-      webpageUrl: raw.webpage_url || url,
-    };
   }
 
   public async startDownload(
@@ -319,7 +486,7 @@ export class DownloadManager {
         item.emitter.ytDlpProcess.kill('SIGTERM');
       }
     } catch (e) {
-      console.warn(`Error killing process for download ${downloadId}:`, e);
+      logger.warn(`Error killing process for download ${downloadId}:`, e);
     }
 
     this.activeDownloads.delete(downloadId);

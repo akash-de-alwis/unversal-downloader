@@ -191,6 +191,8 @@ export interface IpcApi {
   onUpdateStatus: (callback: (status: UpdateStatus) => void) => () => void;
   hasCompletedOnboarding: () => Promise<boolean>;
   setOnboardingCompleted: () => Promise<void>;
+  openLogFile: () => Promise<boolean>;
+  getLogPath: () => Promise<string>;
 }
 
 declare global {

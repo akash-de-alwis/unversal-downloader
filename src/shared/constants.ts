@@ -35,6 +35,8 @@ export const IPC_CHANNELS = {
   UPDATER_STATUS: 'updater:status',
   STORE_GET_ONBOARDING: 'store:get-onboarding',
   STORE_SET_ONBOARDING: 'store:set-onboarding',
+  LOGS_OPEN: 'logs:open',
+  LOGS_GET_PATH: 'logs:get-path',
 } as const;
 
 export const APP_METADATA = {
