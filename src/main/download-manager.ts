@@ -1,7 +1,6 @@
 import { app } from 'electron';
 import path from 'node:path';
 import fs from 'node:fs';
-import child_process from 'node:child_process';
 import YTDlpWrap from 'yt-dlp-wrap';
 import ffmpegPath from 'ffmpeg-static';
 import { logger } from './logger';
@@ -25,7 +24,7 @@ export class DownloadManager {
   private ytDlp: YTDlpWrap | null = null;
   private binaryPath: string = '';
   private ffmpegBinaryPath: string = '';
-  private nodeBinaryPath: string | null = null;
+  private denoBinaryPath: string = '';
   private activeDownloads: Map<string, ActiveDownload> = new Map();
   private progressCallback: ((progress: DownloadProgress) => void) | null = null;
   private infoCache = new Map<string, { data: VideoMetadata; timestamp: number }>();
@@ -33,7 +32,7 @@ export class DownloadManager {
 
   constructor() {
     this.ffmpegBinaryPath = this.resolveFfmpegPath();
-    this.nodeBinaryPath = this.resolveNodePath();
+    this.denoBinaryPath = this.resolveDenoPath();
   }
 
   public setProgressCallback(cb: (progress: DownloadProgress) => void): void {
@@ -48,33 +47,54 @@ export class DownloadManager {
     return resolved;
   }
 
-  private resolveNodePath(): string | null {
-    if (process.platform === 'win32') {
-      const candidates = [
-        'C:\\Program Files\\nodejs\\node.exe',
-        'C:\\Program Files (x86)\\nodejs\\node.exe',
-        path.join(process.env.LOCALAPPDATA || '', 'Programs', 'node', 'node.exe'),
-      ];
-      for (const candidate of candidates) {
-        if (candidate && fs.existsSync(candidate)) {
-          logger.info(`[DownloadManager] Detected Node.js at "${candidate}" for JS challenge acceleration.`);
-          return candidate;
+  private resolveDenoPath(): string {
+    const isWin = process.platform === 'win32';
+    const binaryName = isWin ? 'deno.exe' : 'deno';
+
+    const candidates: string[] = [];
+
+    // Packaged app: extraResources located at process.resourcesPath
+    if (process.resourcesPath) {
+      candidates.push(path.join(process.resourcesPath, 'bin', binaryName));
+      candidates.push(path.join(process.resourcesPath, binaryName));
+    }
+
+    // Development / project root bin/
+    candidates.push(path.resolve(process.cwd(), 'bin', binaryName));
+
+    try {
+      if (app && typeof app.getAppPath === 'function') {
+        candidates.push(path.join(app.getAppPath(), 'bin', binaryName));
+      }
+      if (app && typeof app.getPath === 'function') {
+        candidates.push(path.join(app.getPath('userData'), 'bin', binaryName));
+      }
+    } catch {
+      // app paths may not be available early
+    }
+
+    for (const candidate of candidates) {
+      if (fs.existsSync(candidate)) {
+        try {
+          const stats = fs.statSync(candidate);
+          if (stats.size > 5 * 1024 * 1024) { // sanity check: deno.exe should be >5MB
+            logger.info(
+              `[DownloadManager] Found bundled Deno at "${candidate}" (${(stats.size / (1024 * 1024)).toFixed(1)} MB)`
+            );
+            return candidate;
+          }
+        } catch {
+          // skip unreadable candidates
         }
       }
     }
 
-    try {
-      const cmd = process.platform === 'win32' ? 'where.exe node' : 'which node';
-      const output = child_process.execSync(cmd, { encoding: 'utf8', timeout: 2000 }).trim();
-      const firstLine = output.split(/\r?\n/)[0]?.trim();
-      if (firstLine && fs.existsSync(firstLine)) {
-        logger.info(`[DownloadManager] Found Node.js in PATH at "${firstLine}".`);
-        return firstLine;
-      }
-    } catch {
-      // Node.js not detected in PATH
-    }
-    return null;
+    logger.warn(
+      `[DownloadManager] Bundled Deno binary not found in any candidate path. ` +
+      `JS challenge solving will fall back to yt-dlp defaults. ` +
+      `Searched: ${candidates.join(', ')}`
+    );
+    return '';
   }
 
   private initPromise: Promise<void> | null = null;
@@ -96,6 +116,10 @@ export class DownloadManager {
     logger.info(
       `[DownloadManager] Initializing yt-dlp engine on platform=${process.platform}, arch=${process.arch}...`
     );
+
+    if (!this.denoBinaryPath) {
+      this.denoBinaryPath = this.resolveDenoPath();
+    }
 
     // Cache in app's userData directory
     const userDataPath = app.getPath('userData');
@@ -230,8 +254,8 @@ export class DownloadManager {
       '--skip-download', // Pure metadata extraction, skip downloading
       '--no-check-formats', // Skip slow HTTP probes for every format
     ];
-    if (this.nodeBinaryPath) {
-      args.push('--js-runtimes', `node:${this.nodeBinaryPath}`);
+    if (this.denoBinaryPath) {
+      args.push('--js-runtimes', `deno:${this.denoBinaryPath}`);
     }
     if (this.ffmpegBinaryPath) {
       args.push('--ffmpeg-location', this.ffmpegBinaryPath);
@@ -481,8 +505,8 @@ export class DownloadManager {
       '--no-playlist',
     ];
 
-    if (this.nodeBinaryPath) {
-      args.push('--js-runtimes', `node:${this.nodeBinaryPath}`);
+    if (this.denoBinaryPath) {
+      args.push('--js-runtimes', `deno:${this.denoBinaryPath}`);
     }
 
     if (this.ffmpegBinaryPath) {
