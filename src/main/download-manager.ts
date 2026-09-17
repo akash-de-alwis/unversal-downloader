@@ -1,6 +1,7 @@
 import { app } from 'electron';
 import path from 'node:path';
 import fs from 'node:fs';
+import child_process from 'node:child_process';
 import YTDlpWrap from 'yt-dlp-wrap';
 import ffmpegPath from 'ffmpeg-static';
 import { logger } from './logger';
@@ -24,11 +25,15 @@ export class DownloadManager {
   private ytDlp: YTDlpWrap | null = null;
   private binaryPath: string = '';
   private ffmpegBinaryPath: string = '';
+  private nodeBinaryPath: string | null = null;
   private activeDownloads: Map<string, ActiveDownload> = new Map();
   private progressCallback: ((progress: DownloadProgress) => void) | null = null;
+  private infoCache = new Map<string, { data: VideoMetadata; timestamp: number }>();
+  private readonly CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes cache
 
   constructor() {
     this.ffmpegBinaryPath = this.resolveFfmpegPath();
+    this.nodeBinaryPath = this.resolveNodePath();
   }
 
   public setProgressCallback(cb: (progress: DownloadProgress) => void): void {
@@ -41,6 +46,35 @@ export class DownloadManager {
       resolved = resolved.replace('app.asar', 'app.asar.unpacked');
     }
     return resolved;
+  }
+
+  private resolveNodePath(): string | null {
+    if (process.platform === 'win32') {
+      const candidates = [
+        'C:\\Program Files\\nodejs\\node.exe',
+        'C:\\Program Files (x86)\\nodejs\\node.exe',
+        path.join(process.env.LOCALAPPDATA || '', 'Programs', 'node', 'node.exe'),
+      ];
+      for (const candidate of candidates) {
+        if (candidate && fs.existsSync(candidate)) {
+          logger.info(`[DownloadManager] Detected Node.js at "${candidate}" for JS challenge acceleration.`);
+          return candidate;
+        }
+      }
+    }
+
+    try {
+      const cmd = process.platform === 'win32' ? 'where.exe node' : 'which node';
+      const output = child_process.execSync(cmd, { encoding: 'utf8', timeout: 2000 }).trim();
+      const firstLine = output.split(/\r?\n/)[0]?.trim();
+      if (firstLine && fs.existsSync(firstLine)) {
+        logger.info(`[DownloadManager] Found Node.js in PATH at "${firstLine}".`);
+        return firstLine;
+      }
+    } catch {
+      // Node.js not detected in PATH
+    }
+    return null;
   }
 
   private initPromise: Promise<void> | null = null;
@@ -179,9 +213,26 @@ export class DownloadManager {
     const startTime = Date.now();
     logger.info(`[fetchInfo] Starting info extraction for URL: "${url}" (timeout: ${timeoutMs}ms)`);
 
+    // Return instant cached response if recently analyzed
+    const cached = this.infoCache.get(url);
+    if (cached && Date.now() - cached.timestamp < this.CACHE_TTL_MS) {
+      logger.info(`[fetchInfo] Returning cached metadata for: "${url}" (0ms)`);
+      return cached.data;
+    }
+
     const yt = await this.ensureInitialized();
 
-    const args = ['--dump-json', '--no-warnings', '--no-playlist'];
+    const args = [
+      '-4', // Crucial: Force IPv4 to eliminate 60-120s IPv6 socket connect timeout stalls on Windows
+      '--dump-json',
+      '--no-warnings',
+      '--no-playlist',
+      '--skip-download', // Pure metadata extraction, skip downloading
+      '--no-check-formats', // Skip slow HTTP probes for every format
+    ];
+    if (this.nodeBinaryPath) {
+      args.push('--js-runtimes', `node:${this.nodeBinaryPath}`);
+    }
     if (this.ffmpegBinaryPath) {
       args.push('--ffmpeg-location', this.ffmpegBinaryPath);
     }
@@ -294,7 +345,7 @@ export class DownloadManager {
           ? raw.thumbnails[raw.thumbnails.length - 1].url
           : '');
 
-      return {
+      const result: VideoMetadata = {
         title: raw.title || 'Untitled Media',
         thumbnail: thumbnail || '',
         duration,
@@ -303,6 +354,11 @@ export class DownloadManager {
         formats,
         webpageUrl: raw.webpage_url || url,
       };
+
+      // Cache metadata for instant retrieval on repeat operations
+      this.infoCache.set(url, { data: result, timestamp: Date.now() });
+
+      return result;
     } catch (err: any) {
       const durationMs = Date.now() - startTime;
       if (timeoutTimer) clearTimeout(timeoutTimer);
@@ -407,19 +463,33 @@ export class DownloadManager {
     }
 
     const args = [
+      '-4', // Force IPv4: avoids fragment socket stalling
       url,
       '-f',
       formatArg,
       '--continue',
+      '-N',
+      '8', // Download 8 fragments concurrently for multi-threaded speedup
+      '--buffer-size',
+      '1024K', // Increased download buffer
+      '--http-chunk-size',
+      '10M', // 10MB chunks to prevent throttling from platforms like YouTube
+      '--no-mtime', // Skip file modification time write to finish immediately
       '-o',
       finalOutputPath,
       '--no-warnings',
       '--no-playlist',
     ];
 
+    if (this.nodeBinaryPath) {
+      args.push('--js-runtimes', `node:${this.nodeBinaryPath}`);
+    }
+
     if (this.ffmpegBinaryPath) {
       args.push('--ffmpeg-location', this.ffmpegBinaryPath);
     }
+
+    logger.info(`[startDownload] Launching high-speed download with args: ${args.join(' ')}`);
 
     const emitter = yt.exec(args);
 
