@@ -452,6 +452,98 @@ export class DownloadManager {
     }
   }
 
+  /**
+   * Remove stale partial / temp files that yt-dlp leaves behind (.part, .ytdl,
+   * and the temp merge file). If these exist when a new download starts with
+   * `--continue`, yt-dlp may try to resume from a corrupted state, producing
+   * "Conflicting range" off-by-one errors (e.g. start=970 > end=969).
+   */
+  private cleanPartialFiles(outputPath: string): void {
+    const candidates = new Set<string>([
+      `${outputPath}.part`,      // yt-dlp partial download
+      `${outputPath}.ytdl`,      // yt-dlp resume metadata
+      `${outputPath}.part.ytdl`, // alternative resume metadata
+    ]);
+
+    // Also clean up fragment-style temp files (e.g. output.mp4.f303.mp4.part, output.mp4.part-Frag1)
+    try {
+      const dir = path.dirname(outputPath);
+      const baseName = path.basename(outputPath);
+      // Strip extension to build the fragment pattern (e.g. "video" from "video.mp4")
+      const baseNoExt = baseName.replace(/\.[^.]+$/, '');
+      if (fs.existsSync(dir)) {
+        const dirEntries = fs.readdirSync(dir);
+        for (const entry of dirEntries) {
+          if (entry === baseName) continue; // Never delete existing non-empty main target file here
+
+          const isExactPrefix = entry.startsWith(baseName + '.');
+          const isBaseNoExtPrefix = entry.startsWith(baseNoExt + '.');
+
+          if (isExactPrefix) {
+            // Any file starting with "myvideo.mp4." is a temp/fragment file created by yt-dlp
+            candidates.add(path.join(dir, entry));
+          } else if (isBaseNoExtPrefix) {
+            // e.g. "myvideo.f251.webm", "myvideo.part-Frag26", "myvideo.temp.mp4"
+            if (
+              entry.includes('.part') ||
+              entry.includes('.ytdl') ||
+              entry.includes('-Frag') ||
+              entry.includes('.temp') ||
+              /\.f\d+\./.test(entry)
+            ) {
+              candidates.add(path.join(dir, entry));
+            }
+          }
+        }
+      }
+    } catch (scanErr) {
+      logger.warn(`[cleanPartialFiles] Error scanning for fragment temp files:`, scanErr);
+    }
+
+    for (const filePath of candidates) {
+      try {
+        if (fs.existsSync(filePath)) {
+          fs.unlinkSync(filePath);
+          logger.info(`[cleanPartialFiles] Removed stale temp file: "${filePath}"`);
+        }
+      } catch (err) {
+        logger.warn(`[cleanPartialFiles] Failed to remove "${filePath}":`, err);
+      }
+    }
+
+    // Also remove the main target file if it already exists but is 0 bytes (corrupted/empty)
+    try {
+      if (fs.existsSync(outputPath)) {
+        const stat = fs.statSync(outputPath);
+        if (stat.size === 0) {
+          fs.unlinkSync(outputPath);
+          logger.info(`[cleanPartialFiles] Removed 0-byte corrupt output file: "${outputPath}"`);
+        }
+      }
+    } catch (err) {
+      logger.warn(`[cleanPartialFiles] Failed checking main output file size:`, err);
+    }
+  }
+
+  /**
+   * Check if an error message indicates a range / chunking conflict that would
+   * benefit from retrying with conservative single-connection settings.
+   */
+  private isRangeOrChunkError(errorMsg: string): boolean {
+    const patterns = [
+      /conflicting.*range/i,
+      /range.*not.*satisfiable/i,
+      /http.*error.*416/i,
+      /requested range/i,
+      /start=\d+.*>.*end=\d+/i,
+      /chunk.*error/i,
+      /http.*chunk.*size/i,
+      /content.*range.*invalid/i,
+      /downloaded.*file.*is.*empty/i,
+    ];
+    return patterns.some((p) => p.test(errorMsg));
+  }
+
   public async startDownload(
     url: string,
     formatId: string,
@@ -475,6 +567,11 @@ export class DownloadManager {
       fs.mkdirSync(parentDir, { recursive: true });
     }
 
+    // ── FIX (1): Clean stale partial / temp files before starting ────────
+    // This prevents yt-dlp from trying to --continue a corrupted partial file,
+    // which is the root cause of "Conflicting range" errors on Pinterest.
+    this.cleanPartialFiles(finalOutputPath);
+
     // Format selection argument
     let formatArg = formatId;
     if (formatId === 'lowest') {
@@ -486,24 +583,67 @@ export class DownloadManager {
       formatArg = `${formatId}+bestaudio/best/${formatId}`;
     }
 
+    // Start with aggressive multi-connection settings (optimised for YouTube)
+    return this.launchDownload(yt, {
+      downloadId,
+      url,
+      formatArg,
+      finalOutputPath,
+      useAggressiveSettings: true,
+    });
+  }
+
+  /**
+   * Internal: actually launch a yt-dlp download. Separated out so we can call
+   * it a second time with conservative settings on a retry.
+   */
+  private launchDownload(
+    yt: YTDlpWrap,
+    opts: {
+      downloadId: string;
+      url: string;
+      formatArg: string;
+      finalOutputPath: string;
+      useAggressiveSettings: boolean;
+      isRetry?: boolean;
+    }
+  ): Promise<StartDownloadResult> {
+    const { downloadId, url, formatArg, finalOutputPath, useAggressiveSettings, isRetry } = opts;
+
     const args = [
       '-4', // Force IPv4: avoids fragment socket stalling
       url,
       '-f',
       formatArg,
-      '--continue',
-      '-N',
-      '8', // Download 8 fragments concurrently for multi-threaded speedup
-      '--buffer-size',
-      '1024K', // Increased download buffer
-      '--http-chunk-size',
-      '10M', // 10MB chunks to prevent throttling from platforms like YouTube
       '--no-mtime', // Skip file modification time write to finish immediately
       '-o',
       finalOutputPath,
       '--no-warnings',
       '--no-playlist',
     ];
+
+    if (finalOutputPath.toLowerCase().endsWith('.mp4')) {
+      args.push('--merge-output-format', 'mp4');
+    }
+
+    if (useAggressiveSettings) {
+      // ── Aggressive: multi-connection, chunked (great for YouTube CDN) ──
+      args.push(
+        '--continue',
+        '-N', '8',             // 8 concurrent fragment connections
+        '--buffer-size', '1024K',
+        '--http-chunk-size', '10M', // 10MB chunks
+      );
+    } else {
+      // ── Conservative: single-connection, no chunking (safer fallback) ──
+      // Many platforms (Pinterest, Instagram, Twitter/X) don't support HTTP
+      // range requests or multi-connection downloads reliably.
+      args.push(
+        '--no-continue',       // Force fresh download, ignore stale partials
+        '-N', '1',             // Single connection
+        '--buffer-size', '512K',
+      );
+    }
 
     if (this.denoBinaryPath) {
       args.push('--js-runtimes', `deno:${this.denoBinaryPath}`);
@@ -513,9 +653,20 @@ export class DownloadManager {
       args.push('--ffmpeg-location', this.ffmpegBinaryPath);
     }
 
-    logger.info(`[startDownload] Launching high-speed download with args: ${args.join(' ')}`);
+    const settingsLabel = useAggressiveSettings ? 'aggressive (N=8, 10M chunks)' : 'conservative (N=1, no chunks)';
+    logger.info(
+      `[startDownload] Launching download [${settingsLabel}]${isRetry ? ' (RETRY)' : ''} with args: ${args.join(' ')}`
+    );
 
     const emitter = yt.exec(args);
+
+    // Collect stderr for error analysis (range/chunk detection)
+    let stderrBuffer = '';
+    if (emitter.ytDlpProcess?.stderr) {
+      emitter.ytDlpProcess.stderr.on('data', (chunk: Buffer) => {
+        stderrBuffer += chunk.toString();
+      });
+    }
 
     const activeItem: ActiveDownload = {
       downloadId,
@@ -540,7 +691,10 @@ export class DownloadManager {
     });
 
     emitter.on('close', () => {
-      if (activeItem.isCancelled) return;
+      if (activeItem.isCancelled) {
+        this.cleanPartialFiles(finalOutputPath);
+        return;
+      }
       this.activeDownloads.delete(downloadId);
       this.progressCallback?.({
         downloadId,
@@ -552,6 +706,52 @@ export class DownloadManager {
 
     emitter.on('error', (err: any) => {
       if (activeItem.isCancelled) return;
+
+      const errMsg = (err?.message || '') + '\n' + stderrBuffer;
+
+      // ── FIX (3): Retry with conservative settings on range/chunk errors ─
+      if (useAggressiveSettings && !isRetry && this.isRangeOrChunkError(errMsg)) {
+        logger.warn(
+          `[startDownload] Range/chunk error detected, retrying with conservative settings. ` +
+          `Error: ${err?.message || 'unknown'}`
+        );
+
+        // Clean up failed partial files before retry
+        this.cleanPartialFiles(finalOutputPath);
+        // Also remove the main output file if it exists but is empty/corrupt
+        try {
+          if (fs.existsSync(finalOutputPath)) {
+            const stat = fs.statSync(finalOutputPath);
+            if (stat.size === 0) {
+              fs.unlinkSync(finalOutputPath);
+              logger.info(`[startDownload] Removed empty output file before retry: "${finalOutputPath}"`);
+            }
+          }
+        } catch { /* ignore */ }
+
+        this.activeDownloads.delete(downloadId);
+
+        // Retry with conservative (single-connection) settings
+        this.launchDownload(yt, {
+          downloadId,
+          url,
+          formatArg,
+          finalOutputPath,
+          useAggressiveSettings: false,
+          isRetry: true,
+        }).catch((retryErr) => {
+          logger.error(`[startDownload] Conservative retry also failed:`, retryErr);
+          this.progressCallback?.({
+            downloadId,
+            percent: 0,
+            status: 'error',
+            error: retryErr?.message || 'Download failed after retry with conservative settings',
+            outputPath: finalOutputPath,
+          });
+        });
+        return; // Don't emit error — the retry will handle it
+      }
+
       this.activeDownloads.delete(downloadId);
       this.progressCallback?.({
         downloadId,
@@ -562,7 +762,7 @@ export class DownloadManager {
       });
     });
 
-    return { downloadId, outputPath: finalOutputPath };
+    return Promise.resolve({ downloadId, outputPath: finalOutputPath });
   }
 
   public async cancelDownload(
@@ -585,13 +785,23 @@ export class DownloadManager {
 
     this.activeDownloads.delete(downloadId);
 
-    // Clean up partial file if requested
+    // ── FIX (2): Thorough cleanup of ALL temp files on cancel ────────────
+    // Prevents orphaned .part/.ytdl files from causing "Conflicting range"
+    // errors on the next download attempt to the same output path.
     if (!keepPartial) {
+      this.cleanPartialFiles(item.outputPath);
+
+      // Also remove the main output file if it's empty (incomplete write)
       try {
-        const partialPart = `${item.outputPath}.part`;
-        if (fs.existsSync(partialPart)) fs.unlinkSync(partialPart);
+        if (fs.existsSync(item.outputPath)) {
+          const stat = fs.statSync(item.outputPath);
+          if (stat.size === 0) {
+            fs.unlinkSync(item.outputPath);
+            logger.info(`[cancelDownload] Removed empty output file: "${item.outputPath}"`);
+          }
+        }
       } catch {
-        // Ignore partial file cleanup error
+        // Ignore cleanup errors
       }
     }
 
