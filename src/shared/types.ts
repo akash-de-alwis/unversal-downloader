@@ -25,6 +25,7 @@ export interface VideoFormat {
   hasAudio: boolean;
   isLowestQuality?: boolean;
   isHighestQuality?: boolean;
+  protocol?: string;
 }
 
 export interface VideoMetadata {

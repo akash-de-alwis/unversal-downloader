@@ -187,6 +187,9 @@ export class QueueManager {
       );
     } catch (err: any) {
       console.error(`Error starting queue download ${item.id}:`, err);
+      if (item.outputPath) {
+        downloadManager.cleanPartialFiles(item.outputPath);
+      }
       item.status = 'failed';
       item.error = err?.message || 'Download start error';
       item.completedAt = Date.now();

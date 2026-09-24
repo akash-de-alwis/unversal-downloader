@@ -340,6 +340,7 @@ export class DownloadManager {
             fps: f.fps || undefined,
             hasVideo: Boolean(hasVideo),
             hasAudio: Boolean(hasAudio),
+            protocol: f.protocol || undefined,
           });
         }
       }
@@ -453,76 +454,159 @@ export class DownloadManager {
   }
 
   /**
-   * Remove stale partial / temp files that yt-dlp leaves behind (.part, .ytdl,
-   * and the temp merge file). If these exist when a new download starts with
-   * `--continue`, yt-dlp may try to resume from a corrupted state, producing
-   * "Conflicting range" off-by-one errors (e.g. start=970 > end=969).
+   * Safe asynchronous/retried deletion to handle Windows file locking
+   * when processes have just closed.
    */
-  private cleanPartialFiles(outputPath: string): void {
-    const candidates = new Set<string>([
-      `${outputPath}.part`,      // yt-dlp partial download
-      `${outputPath}.ytdl`,      // yt-dlp resume metadata
-      `${outputPath}.part.ytdl`, // alternative resume metadata
-    ]);
-
-    // Also clean up fragment-style temp files (e.g. output.mp4.f303.mp4.part, output.mp4.part-Frag1)
-    try {
-      const dir = path.dirname(outputPath);
-      const baseName = path.basename(outputPath);
-      // Strip extension to build the fragment pattern (e.g. "video" from "video.mp4")
-      const baseNoExt = baseName.replace(/\.[^.]+$/, '');
-      if (fs.existsSync(dir)) {
-        const dirEntries = fs.readdirSync(dir);
-        for (const entry of dirEntries) {
-          if (entry === baseName) continue; // Never delete existing non-empty main target file here
-
-          const isExactPrefix = entry.startsWith(baseName + '.');
-          const isBaseNoExtPrefix = entry.startsWith(baseNoExt + '.');
-
-          if (isExactPrefix) {
-            // Any file starting with "myvideo.mp4." is a temp/fragment file created by yt-dlp
-            candidates.add(path.join(dir, entry));
-          } else if (isBaseNoExtPrefix) {
-            // e.g. "myvideo.f251.webm", "myvideo.part-Frag26", "myvideo.temp.mp4"
-            if (
-              entry.includes('.part') ||
-              entry.includes('.ytdl') ||
-              entry.includes('-Frag') ||
-              entry.includes('.temp') ||
-              /\.f\d+\./.test(entry)
-            ) {
-              candidates.add(path.join(dir, entry));
-            }
-          }
-        }
-      }
-    } catch (scanErr) {
-      logger.warn(`[cleanPartialFiles] Error scanning for fragment temp files:`, scanErr);
-    }
-
-    for (const filePath of candidates) {
+  private unlinkWithRetry(filePath: string, retries = 3, delayMs = 150): void {
+    const tryUnlink = (attemptsLeft: number) => {
       try {
         if (fs.existsSync(filePath)) {
           fs.unlinkSync(filePath);
-          logger.info(`[cleanPartialFiles] Removed stale temp file: "${filePath}"`);
+          logger.info(`[cleanPartialFiles] Removed temp/fragment file: "${filePath}"`);
         }
-      } catch (err) {
-        logger.warn(`[cleanPartialFiles] Failed to remove "${filePath}":`, err);
+      } catch (err: any) {
+        if ((err?.code === 'EBUSY' || err?.code === 'EPERM') && attemptsLeft > 0) {
+          setTimeout(() => tryUnlink(attemptsLeft - 1), delayMs);
+        } else {
+          logger.warn(`[cleanPartialFiles] Could not remove "${filePath}":`, err?.message || err);
+        }
+      }
+    };
+    tryUnlink(retries);
+  }
+
+  /**
+   * Thoroughly clean up stale partial, resume, and fragment temp files left behind
+   * by yt-dlp (.part, .ytdl, *.part-Frag*.part, *.part-Frag*, *-Frag*, etc.).
+   * Called before a new download, after any failed download, on cancel, and on completion.
+   */
+  public cleanPartialFiles(outputPath: string): void {
+    try {
+      const dir = path.dirname(outputPath);
+      if (!fs.existsSync(dir)) return;
+
+      const baseName = path.basename(outputPath);
+      // Strip extension to build the base name (e.g. "video" from "video.mp4")
+      const baseNoExt = baseName.replace(/\.[^.]+$/, '');
+
+      // Account for variations where yt-dlp or UI replaces spaces with underscores or vice versa
+      const baseVariants = [
+        baseNoExt.toLowerCase(),
+        baseNoExt.replace(/\s+/g, '_').toLowerCase(),
+        baseNoExt.replace(/_/g, ' ').toLowerCase(),
+        baseNoExt.replace(/[^a-zA-Z0-9]/g, '').toLowerCase(),
+      ].filter(Boolean);
+
+      const candidates = new Set<string>([
+        `${outputPath}.part`,
+        `${outputPath}.ytdl`,
+        `${outputPath}.part.ytdl`,
+      ]);
+
+      const dirEntries = fs.readdirSync(dir);
+      for (const entry of dirEntries) {
+        // Never delete the final completed non-empty output file
+        if (entry === baseName) continue;
+
+        const entryLower = entry.toLowerCase();
+
+        // 1. Check if file matches target base name variants
+        const matchesTargetBase = baseVariants.some((v) => {
+          return (
+            entryLower.startsWith(v + '.') ||
+            entryLower.startsWith(v + '_') ||
+            entryLower.startsWith(v + '-') ||
+            entryLower === v
+          );
+        });
+
+        // 2. Fragment file patterns: *.part-Frag*.part, *.part-Frag*, *-Frag*
+        const isFragmentFile =
+          /\.part-Frag\d+(\.part)?$/i.test(entry) ||
+          /-Frag\d+(\.part)?$/i.test(entry) ||
+          entry.includes('.part-Frag') ||
+          entry.includes('-Frag');
+
+        // 3. Temporary / partial / stream patterns
+        const isTempOrStreamFile =
+          entry.endsWith('.part') ||
+          entry.endsWith('.ytdl') ||
+          entry.endsWith('.temp') ||
+          /\.f[a-zA-Z0-9_-]+\./.test(entry);
+
+        if (matchesTargetBase && (isFragmentFile || isTempOrStreamFile)) {
+          candidates.add(path.join(dir, entry));
+        } else if (isFragmentFile) {
+          // Orphaned fragment files matching *.part-Frag*.part anywhere in target directory
+          candidates.add(path.join(dir, entry));
+        }
+      }
+
+      for (const filePath of candidates) {
+        this.unlinkWithRetry(filePath);
+      }
+
+      // Also remove main target file if it already exists but is 0 bytes (corrupt / incomplete)
+      if (fs.existsSync(outputPath)) {
+        try {
+          const stat = fs.statSync(outputPath);
+          if (stat.size === 0) {
+            fs.unlinkSync(outputPath);
+            logger.info(`[cleanPartialFiles] Removed 0-byte corrupt output file: "${outputPath}"`);
+          }
+        } catch (err) {
+          logger.warn(`[cleanPartialFiles] Failed checking main output file size:`, err);
+        }
+      }
+    } catch (scanErr) {
+      logger.warn(`[cleanPartialFiles] Error scanning for fragment/temp files in "${outputPath}":`, scanErr);
+    }
+  }
+
+  /**
+   * Detect whether a download source uses HLS (m3u8), DASH, or fragmented streaming.
+   * On fragmented sources, --http-chunk-size causes "Conflicting range" / HTTP 416
+   * because CDNs deliver individual segment files (.ts / .m4s) and reject byte-range
+   * requests on those segments.
+   */
+  private isHlsOrFragmented(url: string, formatArg: string): boolean {
+    // 1. Check formatArg / formatId heuristics (e.g. V_HLSV3_MOBILE-..., hls-..., m3u8, dash)
+    if (/hls|m3u8|dash|frag/i.test(formatArg)) {
+      return true;
+    }
+
+    // 2. Check cached metadata for this URL
+    const cached = this.infoCache.get(url);
+    if (cached?.data?.formats) {
+      const matching = cached.data.formats.filter((f) => {
+        if (f.formatId && formatArg.includes(f.formatId)) return true;
+        return false;
+      });
+
+      const formatsToCheck = matching.length > 0 ? matching : cached.data.formats;
+      for (const f of formatsToCheck) {
+        if (
+          f.protocol &&
+          (f.protocol.includes('m3u8') ||
+            f.protocol.includes('dash') ||
+            f.protocol.includes('frag') ||
+            f.protocol === 'm3u8_native' ||
+            f.protocol === 'http_dash_segments')
+        ) {
+          return true;
+        }
+        if (f.formatId && /hls|m3u8|dash/i.test(f.formatId)) {
+          return true;
+        }
       }
     }
 
-    // Also remove the main target file if it already exists but is 0 bytes (corrupted/empty)
-    try {
-      if (fs.existsSync(outputPath)) {
-        const stat = fs.statSync(outputPath);
-        if (stat.size === 0) {
-          fs.unlinkSync(outputPath);
-          logger.info(`[cleanPartialFiles] Removed 0-byte corrupt output file: "${outputPath}"`);
-        }
-      }
-    } catch (err) {
-      logger.warn(`[cleanPartialFiles] Failed checking main output file size:`, err);
+    // 3. Known HLS-centric platforms when format is generic (best, worst)
+    if (/pin\.it|pinterest\.com|tiktok\.com|instagram\.com/i.test(url)) {
+      return true;
     }
+
+    return false;
   }
 
   /**
@@ -626,14 +710,28 @@ export class DownloadManager {
       args.push('--merge-output-format', 'mp4');
     }
 
+    const isHls = this.isHlsOrFragmented(url, formatArg);
+
     if (useAggressiveSettings) {
-      // ── Aggressive: multi-connection, chunked (great for YouTube CDN) ──
-      args.push(
-        '--continue',
-        '-N', '8',             // 8 concurrent fragment connections
-        '--buffer-size', '1024K',
-        '--http-chunk-size', '10M', // 10MB chunks
-      );
+      if (isHls) {
+        // ── Aggressive HLS/Fragmented: Native fragment concurrency (-N 8), NO byte-range chunking ──
+        // HLS/DASH delivers media in pre-sliced fragments (.ts / .m4s). Passing --http-chunk-size causes
+        // yt-dlp to send byte-range HTTP headers for each fragment, which CDNs reject (Conflicting range / 416).
+        // We leverage yt-dlp's native fragment concurrency (-N 8) while omitting --http-chunk-size.
+        args.push(
+          '--continue',
+          '-N', '8',             // 8 concurrent fragment connections
+          '--buffer-size', '1024K',
+        );
+      } else {
+        // ── Aggressive Progressive (e.g. YouTube): Multi-connection + 10MB chunking ──
+        args.push(
+          '--continue',
+          '-N', '8',             // 8 concurrent connections
+          '--buffer-size', '1024K',
+          '--http-chunk-size', '10M', // 10MB byte-range chunks to avoid ISP/CDN throttling
+        );
+      }
     } else {
       // ── Conservative: single-connection, no chunking (safer fallback) ──
       // Many platforms (Pinterest, Instagram, Twitter/X) don't support HTTP
@@ -653,7 +751,11 @@ export class DownloadManager {
       args.push('--ffmpeg-location', this.ffmpegBinaryPath);
     }
 
-    const settingsLabel = useAggressiveSettings ? 'aggressive (N=8, 10M chunks)' : 'conservative (N=1, no chunks)';
+    const settingsLabel = useAggressiveSettings
+      ? isHls
+        ? 'aggressive-hls (N=8 fragments, native concurrency, no range-chunking)'
+        : 'aggressive-progressive (N=8, 10M chunks)'
+      : 'conservative (N=1, no chunks)';
     logger.info(
       `[startDownload] Launching download [${settingsLabel}]${isRetry ? ' (RETRY)' : ''} with args: ${args.join(' ')}`
     );
@@ -696,6 +798,8 @@ export class DownloadManager {
         return;
       }
       this.activeDownloads.delete(downloadId);
+      // Clean up any lingering fragment files or temp files while keeping final completed file
+      this.cleanPartialFiles(finalOutputPath);
       this.progressCallback?.({
         downloadId,
         percent: 100,
@@ -705,11 +809,14 @@ export class DownloadManager {
     });
 
     emitter.on('error', (err: any) => {
-      if (activeItem.isCancelled) return;
+      if (activeItem.isCancelled) {
+        this.cleanPartialFiles(finalOutputPath);
+        return;
+      }
 
       const errMsg = (err?.message || '') + '\n' + stderrBuffer;
 
-      // ── FIX (3): Retry with conservative settings on range/chunk errors ─
+      // ── Retry with conservative settings on range/chunk errors ─
       if (useAggressiveSettings && !isRetry && this.isRangeOrChunkError(errMsg)) {
         logger.warn(
           `[startDownload] Range/chunk error detected, retrying with conservative settings. ` +
@@ -718,17 +825,6 @@ export class DownloadManager {
 
         // Clean up failed partial files before retry
         this.cleanPartialFiles(finalOutputPath);
-        // Also remove the main output file if it exists but is empty/corrupt
-        try {
-          if (fs.existsSync(finalOutputPath)) {
-            const stat = fs.statSync(finalOutputPath);
-            if (stat.size === 0) {
-              fs.unlinkSync(finalOutputPath);
-              logger.info(`[startDownload] Removed empty output file before retry: "${finalOutputPath}"`);
-            }
-          }
-        } catch { /* ignore */ }
-
         this.activeDownloads.delete(downloadId);
 
         // Retry with conservative (single-connection) settings
@@ -741,6 +837,7 @@ export class DownloadManager {
           isRetry: true,
         }).catch((retryErr) => {
           logger.error(`[startDownload] Conservative retry also failed:`, retryErr);
+          this.cleanPartialFiles(finalOutputPath);
           this.progressCallback?.({
             downloadId,
             percent: 0,
@@ -752,7 +849,9 @@ export class DownloadManager {
         return; // Don't emit error — the retry will handle it
       }
 
+      // On any download error, clean up all partial, fragment, and empty files
       this.activeDownloads.delete(downloadId);
+      this.cleanPartialFiles(finalOutputPath);
       this.progressCallback?.({
         downloadId,
         percent: 0,
