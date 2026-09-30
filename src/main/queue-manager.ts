@@ -11,6 +11,7 @@ import type {
   DownloadProgress,
 } from '../shared/types';
 import { downloadManager } from './download-manager';
+import { statsClient } from './stats-client';
 
 interface PersistentStoreSchema {
   settings: AppSettings;
@@ -218,6 +219,7 @@ export class QueueManager {
         item.outputPath = progress.outputPath;
       }
       this.addHistoryEntry(item, 'completed');
+      statsClient.reportDownloadComplete();
       this.emitQueueState();
       this.dispatch();
     } else if (progress.status === 'error') {

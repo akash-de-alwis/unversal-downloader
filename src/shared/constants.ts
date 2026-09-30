@@ -10,6 +10,7 @@ export const IPC_CHANNELS = {
   STORE_SET_DOWNLOAD_FOLDER: 'store:set-download-folder',
   CLIPBOARD_READ: 'clipboard:read',
   SHELL_OPEN_PATH: 'shell:open-path',
+  SHELL_OPEN_EXTERNAL: 'shell:open-external',
 
   // Queue Channels
   QUEUE_GET_ITEMS: 'queue:get-items',
@@ -37,6 +38,9 @@ export const IPC_CHANNELS = {
   STORE_SET_ONBOARDING: 'store:set-onboarding',
   LOGS_OPEN: 'logs:open',
   LOGS_GET_PATH: 'logs:get-path',
+
+  // Anonymous public stats
+  STATS_GET: 'stats:get',
 } as const;
 
 export const APP_METADATA = {
@@ -44,3 +48,9 @@ export const APP_METADATA = {
   VERSION: '1.0.0',
   DESCRIPTION: 'Cross-platform universal desktop downloader',
 } as const;
+
+/** Bitrate for audio-only downloads, which are converted to MP3 */
+export const MP3_BITRATE_KBPS = 192;
+
+/** Anonymous usage stats backend (Cloudflare Worker in stats-backend/) */
+export const STATS_API_BASE_URL = 'https://universal-downloader-stats.akashmakes.workers.dev';

@@ -126,6 +126,15 @@ export interface AppSettings {
   hasCompletedOnboarding?: boolean;
 }
 
+/** Public counters from the stats backend, shown on the Download screen */
+export interface PublicStats {
+  totalDownloads: number;
+  activeUsers: {
+    last5Minutes: number;
+    last24Hours: number;
+  };
+}
+
 export interface DiagnosticsReport {
   timestamp: string;
   appVersion: string;
@@ -167,6 +176,7 @@ export interface IpcApi {
   setDownloadFolder: (folderPath: string) => Promise<string>;
   readClipboard: () => Promise<string>;
   openPath: (targetPath: string) => Promise<void>;
+  openExternal: (url: string) => Promise<void>;
 
   // Queue APIs
   getQueue: () => Promise<QueueItem[]>;
@@ -194,6 +204,9 @@ export interface IpcApi {
   setOnboardingCompleted: () => Promise<void>;
   openLogFile: () => Promise<boolean>;
   getLogPath: () => Promise<string>;
+
+  // Anonymous public stats; null when the backend can't be reached
+  getStats: () => Promise<PublicStats | null>;
 }
 
 declare global {

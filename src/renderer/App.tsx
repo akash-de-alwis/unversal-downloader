@@ -1,35 +1,17 @@
 import React, { useState, useEffect } from 'react';
 import {
-  Download,
-  Link as LinkIcon,
-  ArrowDownToLine,
   Activity,
   CheckCircle2,
-  Folder,
   FolderOpen,
   Clipboard,
-  ChevronDown,
-  ChevronUp,
   AlertTriangle,
   RotateCcw,
-  Clock,
-  User,
-  Music,
   Video as VideoIcon,
   XCircle,
-  PlayCircle,
-  Bookmark,
   ExternalLink,
-  Layers,
-  ListOrdered,
-  History as HistoryIcon,
-  Settings as SettingsIcon,
   Pause,
   Play,
   Trash2,
-  Moon,
-  Sun,
-  PlusCircle,
   HelpCircle,
   Copy,
   RefreshCw,
@@ -43,16 +25,43 @@ import type {
   HistoryItem,
   AppSettings,
   UpdateStatus,
+  PublicStats,
 } from '../shared/types';
+import { MP3_BITRATE_KBPS } from '../shared/constants';
 import { OnboardingModal } from './components/OnboardingModal';
+import logoUrl from './assets/logo.png';
+import developerPhotoUrl from './assets/developer.png';
+
+// How often the Download screen refreshes the public stats row
+const STATS_REFRESH_MS = 30_000;
+
+const DEVELOPER_LINKS = {
+  facebook: 'https://www.facebook.com/profile.php?id=61594043770505',
+  tiktok: 'https://www.tiktok.com/@akashmakes',
+} as const;
+
+// lucide-react no longer ships brand marks, so these are inline
+const FacebookIcon: React.FC = () => (
+  <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+    <path d="M24 12.07C24 5.41 18.63 0 12 0S0 5.4 0 12.07C0 18.1 4.39 23.1 10.13 24v-8.44H7.08v-3.49h3.04V9.41c0-3.02 1.8-4.7 4.54-4.7 1.31 0 2.68.24 2.68.24v2.97h-1.5c-1.5 0-1.96.93-1.96 1.89v2.26h3.32l-.53 3.5h-2.8V24C19.62 23.1 24 18.1 24 12.07z" />
+  </svg>
+);
+
+const TikTokIcon: React.FC = () => (
+  <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+    <path d="M12.53.02C13.84 0 15.14.01 16.44 0c.08 1.53.63 3.09 1.75 4.17 1.12 1.11 2.7 1.62 4.24 1.79v4.03c-1.44-.05-2.89-.35-4.2-.97-.57-.26-1.1-.59-1.62-.93-.01 2.92.01 5.84-.02 8.75-.08 1.4-.54 2.79-1.35 3.94-1.31 1.92-3.58 3.17-5.91 3.21-1.43.08-2.86-.31-4.08-1.03-2.02-1.19-3.44-3.37-3.65-5.71-.02-.5-.03-1-.01-1.49.18-1.9 1.12-3.72 2.58-4.96 1.66-1.44 3.98-2.13 6.15-1.72.02 1.48-.04 2.96-.04 4.44-.99-.32-2.15-.23-3.02.37-.63.41-1.11 1.04-1.36 1.75-.21.51-.15 1.07-.14 1.61.24 1.64 1.82 3.02 3.5 2.87 1.12-.01 2.19-.66 2.77-1.61.19-.33.4-.67.41-1.06.1-1.79.06-3.57.07-5.36.01-4.03-.01-8.05.02-12.07z" />
+  </svg>
+);
 
 export type ActiveTab = 'downloader' | 'queue' | 'history' | 'settings';
 export type FetchState = 'idle' | 'loading' | 'preview' | 'error';
 
-function groupFormatsIntoFriendlyOptions(formats: VideoFormat[]): FriendlyFormatOption[] {
+function groupFormatsIntoFriendlyOptions(
+  formats: VideoFormat[],
+  durationSec: number
+): FriendlyFormatOption[] {
   const options: FriendlyFormatOption[] = [];
   const videoFormats = formats.filter((f) => f.hasVideo);
-  const audioFormats = formats.filter((f) => f.hasAudio && !f.hasVideo);
 
   if (videoFormats.length > 0) {
     const sorted = [...videoFormats].sort((a, b) => {
@@ -131,33 +140,33 @@ function groupFormatsIntoFriendlyOptions(formats: VideoFormat[]): FriendlyFormat
     }
   }
 
-  if (audioFormats.length > 0) {
-    const bestAudio = audioFormats[0];
-    options.push({
-      id: 'audio',
-      label: 'Audio only (MP3/M4A)',
-      formatId: bestAudio.formatId,
-      resolution: 'Audio only',
-      ext: bestAudio.ext,
-      filesizeFormatted: bestAudio.filesizeFormatted,
-      isAudioOnly: true,
-      needsMerge: false,
-    });
-  } else {
-    options.push({
-      id: 'audio',
-      label: 'Audio only (Extracted MP3)',
-      formatId: 'ba/b',
-      resolution: 'Audio only',
-      ext: 'mp3',
-      isAudioOnly: true,
-      needsMerge: false,
-    });
-  }
+  // Audio-only takes the best audio track ('ba/b') and converts it to a constant-bitrate
+  // MP3, so the final size follows from the duration rather than the source stream.
+  const mp3Bytes = durationSec > 0 ? (durationSec * MP3_BITRATE_KBPS * 1000) / 8 : 0;
+  options.push({
+    id: 'audio',
+    label: 'Audio only (MP3)',
+    formatId: 'ba/b',
+    resolution: 'Audio only',
+    ext: 'mp3',
+    filesizeFormatted: mp3Bytes ? `~${(mp3Bytes / (1024 * 1024)).toFixed(1)} MB` : undefined,
+    isAudioOnly: true,
+    needsMerge: false,
+  });
 
   return options;
 }
 
+function shortOptionLabel(opt: FriendlyFormatOption): string {
+  const height = opt.resolution.match(/(\d+)x(\d+)/)?.[2] || opt.resolution.match(/(\d+)p/)?.[1];
+  const res = height ? (parseInt(height, 10) >= 2160 ? '4K' : `${height}p`) : '';
+  if (opt.id === 'best') return res ? `Best · ${res}` : 'Best';
+  if (opt.id === 'lowest') return res ? `Lowest · ${res}` : 'Lowest';
+  if (opt.isAudioOnly) return 'Audio';
+  return opt.id === '2160p' ? '4K' : opt.id;
+}
+
+// Main Application Component
 export const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState<ActiveTab>('downloader');
   const [url, setUrl] = useState('');
@@ -189,27 +198,129 @@ export const App: React.FC = () => {
   const [rawErrorDetails, setRawErrorDetails] = useState<string>('');
   const [showErrorDetails, setShowErrorDetails] = useState(false);
 
+  // Anonymous public stats; null hides the stats row (not loaded yet, or backend unreachable)
+  const [publicStats, setPublicStats] = useState<PublicStats | null>(null);
+
+  useEffect(() => {
+    if (activeTab !== 'downloader' || !window.api?.getStats) return;
+    let cancelled = false;
+    const load = () => {
+      window.api
+        .getStats()
+        .then((stats) => !cancelled && setPublicStats(stats))
+        .catch(() => !cancelled && setPublicStats(null));
+    };
+    load();
+    const timer = setInterval(load, STATS_REFRESH_MS);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [activeTab]);
+
   useEffect(() => {
     // Initial data load
     if (window.api?.getAppInfo) {
       window.api.getAppInfo().then(setAppInfo).catch(console.error);
     }
     if (window.api?.getSettings) {
-      window.api.getSettings().then((s) => {
-        setSettings(s);
-        document.documentElement.setAttribute('data-theme', s.theme || 'dark');
-      }).catch(console.error);
+      window.api.getSettings().then(setSettings).catch(console.error);
     }
     if (window.api?.hasCompletedOnboarding) {
-      window.api.hasCompletedOnboarding().then((completed) => {
-        if (!completed) setShowOnboarding(true);
-      }).catch(console.error);
+      window.api
+        .hasCompletedOnboarding()
+        .then((completed) => {
+          if (!completed) setShowOnboarding(true);
+        })
+        .catch(console.error);
     }
     if (window.api?.getQueue) {
       window.api.getQueue().then(setQueue).catch(console.error);
     }
     if (window.api?.getHistory) {
       window.api.getHistory().then(setHistory).catch(console.error);
+    }
+
+    if (!window.api) {
+      setSettings({
+        downloadFolder: 'C:\\Users\\akash\\Downloads',
+        maxConcurrent: 2,
+        theme: 'dark',
+      });
+      setHistory([
+        {
+          id: 'hist-1',
+          title: 'Lo-Fi Chill Beats to Study/Relax to [24/7 Deep Focus Music]',
+          url: 'https://youtube.com/watch?v=mock1',
+          quality: '1080p (60fps)',
+          ext: 'mp4',
+          filePath: 'C:\\Users\\akash\\Downloads\\lofi_chill_beats.mp4',
+          fileSizeFormatted: '184.2 MB',
+          date: '2026-09-27 21:15',
+          status: 'completed',
+          thumbnail: 'https://images.unsplash.com/photo-1518709268805-4e9042af9f23?w=300&q=80',
+        },
+        {
+          id: 'hist-2',
+          title: 'Cinematic Drone 4K Nature Landscapes Across Switzerland',
+          url: 'https://youtube.com/watch?v=mock2',
+          quality: '4K (2160p)',
+          ext: 'mp4',
+          filePath: 'C:\\Users\\akash\\Downloads\\switzerland_4k.mp4',
+          fileSizeFormatted: '1.42 GB',
+          date: '2026-09-27 20:30',
+          status: 'completed',
+          thumbnail: 'https://images.unsplash.com/photo-1506744038136-46273834b3fb?w=300&q=80',
+        },
+        {
+          id: 'hist-3',
+          title: 'Acoustic Guitar Sessions Vol. 3 — Fingerstyle Instrumental Album',
+          url: 'https://youtube.com/watch?v=mock3',
+          quality: 'Audio only (320kbps)',
+          ext: 'mp3',
+          filePath: 'C:\\Users\\akash\\Downloads\\acoustic_guitar_vol3.mp3',
+          fileSizeFormatted: '94.8 MB',
+          date: '2026-09-27 18:45',
+          status: 'completed',
+          thumbnail: 'https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=300&q=80',
+        },
+        {
+          id: 'hist-4',
+          title: 'Full Stack Architecture in 2026: Deep Dive into Distributed Engines',
+          url: 'https://youtube.com/watch?v=mock4',
+          quality: '1080p',
+          ext: 'mp4',
+          filePath: 'C:\\Users\\akash\\Downloads\\fullstack_2026.mp4',
+          fileSizeFormatted: '412.0 MB',
+          date: '2026-09-27 16:10',
+          status: 'completed',
+          thumbnail: 'https://images.unsplash.com/photo-1517694712202-14dd9538aa97?w=300&q=80',
+        },
+        {
+          id: 'hist-5',
+          title: 'Tokyo Cyberpunk Midnight Walk in Rain — Binaural 3D Audio',
+          url: 'https://youtube.com/watch?v=mock5',
+          quality: '1440p',
+          ext: 'mkv',
+          filePath: 'C:\\Users\\akash\\Downloads\\tokyo_midnight.mkv',
+          fileSizeFormatted: '890.5 MB',
+          date: '2026-09-26 23:50',
+          status: 'completed',
+          thumbnail: 'https://images.unsplash.com/photo-1503899036084-c55cdd92da26?w=300&q=80',
+        },
+        {
+          id: 'hist-6',
+          title: 'Introduction to Quantum Algorithms and Tensor Networks',
+          url: 'https://youtube.com/watch?v=mock6',
+          quality: '720p',
+          ext: 'mp4',
+          filePath: 'C:\\Users\\akash\\Downloads\\quantum_algorithms.mp4',
+          fileSizeFormatted: '215.3 MB',
+          date: '2026-09-26 14:20',
+          status: 'completed',
+          thumbnail: 'https://images.unsplash.com/photo-1635070041078-e363dbe005cb?w=300&q=80',
+        },
+      ]);
     }
 
     // Subscribe to live queue updates
@@ -264,10 +375,70 @@ export const App: React.FC = () => {
       setFetchState('loading');
       setErrorMessage('');
       setRawErrorDetails('');
-      setShowErrorDetails(false);
+      if (!window.api?.fetchInfo) {
+        setTimeout(() => {
+          const mockInfo: VideoMetadata = {
+            id: 'mock-video-id',
+            title: 'Exploring Alpine Peaks: Cinematic 4K HDR Documentary & Nature Soundscapes',
+            webpageUrl: urlToFetch,
+            thumbnail: 'https://images.unsplash.com/photo-1464822759023-fed622ff2c3b?w=600&q=80',
+            duration: 754,
+            durationFormatted: '12:34',
+            uploader: 'Alpine Explorer Studio',
+            viewCount: 2450000,
+            formats: [],
+          };
+          setVideoInfo(mockInfo);
+          setFriendlyOptions([
+            {
+              id: '2160p',
+              label: '4K Ultra HD (2160p)',
+              formatId: '4k',
+              resolution: '3840x2160',
+              ext: 'mp4',
+              filesizeFormatted: '1.2 GB',
+              isAudioOnly: false,
+              needsMerge: true,
+            },
+            {
+              id: '1080p',
+              label: 'Full HD (1080p)',
+              formatId: '1080',
+              resolution: '1920x1080',
+              ext: 'mp4',
+              filesizeFormatted: '380 MB',
+              isAudioOnly: false,
+              needsMerge: true,
+            },
+            {
+              id: '720p',
+              label: 'HD (720p)',
+              formatId: '720',
+              resolution: '1280x720',
+              ext: 'mp4',
+              filesizeFormatted: '145 MB',
+              isAudioOnly: false,
+              needsMerge: false,
+            },
+            {
+              id: 'audio',
+              label: 'Audio only (MP3/M4A)',
+              formatId: 'audio',
+              resolution: 'Audio only',
+              ext: 'mp3',
+              filesizeFormatted: '28 MB',
+              isAudioOnly: true,
+              needsMerge: false,
+            },
+          ]);
+          setSelectedOptionId('1080p');
+          setFetchState('preview');
+        }, 500);
+        return;
+      }
 
       const info = await window.api.fetchInfo(urlToFetch);
-      const grouped = groupFormatsIntoFriendlyOptions(info.formats);
+      const grouped = groupFormatsIntoFriendlyOptions(info.formats, info.duration);
 
       setVideoInfo(info);
       setFriendlyOptions(grouped);
@@ -279,7 +450,8 @@ export const App: React.FC = () => {
     } catch (err: any) {
       console.error('Fetch error:', err);
       const raw = err?.message || String(err);
-      let friendly = 'Could not retrieve video information. Please check the URL and internet connection.';
+      let friendly =
+        'Could not retrieve video information. Please check the URL and internet connection.';
       if (raw.includes('timed out') || raw.includes('timeout')) {
         friendly =
           'Analysis timed out after 30 seconds. The yt-dlp media engine did not respond in time (it may be blocked by Windows Defender/antivirus, stalled by a network firewall, or rate-limited).';
@@ -317,20 +489,43 @@ export const App: React.FC = () => {
     if (!opt) return;
 
     try {
-      const safeTitle = (videoInfo.title || 'video').replace(/[/\\?%*:|"<>]/g, '_').substring(0, 60);
-      const finalExt = opt.ext || 'mp4';
+      const safeTitle = (videoInfo.title || 'video')
+        .replace(/[/\\?%*:|"<>]/g, '_')
+        .substring(0, 60);
+      // Matches what the main process produces: video is remuxed to .mp4, audio converted to .mp3
+      const finalExt = opt.isAudioOnly ? 'mp3' : 'mp4';
       const folder = settings.downloadFolder || '';
       const outputPath = folder ? `${folder}\\${safeTitle}_${opt.id}.${finalExt}` : undefined;
 
-      await window.api.addToQueue({
-        url: url.trim(),
-        title: videoInfo.title,
-        thumbnail: videoInfo.thumbnail,
-        durationFormatted: videoInfo.durationFormatted,
-        qualityLabel: opt.label,
-        formatId: opt.formatId,
-        outputPath,
-      });
+      if (window.api?.addToQueue) {
+        await window.api.addToQueue({
+          url: url.trim(),
+          title: videoInfo.title,
+          thumbnail: videoInfo.thumbnail,
+          durationFormatted: videoInfo.durationFormatted,
+          qualityLabel: opt.label,
+          formatId: opt.formatId,
+          outputPath,
+        });
+      } else {
+        setQueue((prev) => [
+          ...prev,
+          {
+            id: `q-${Date.now()}`,
+            url: url.trim(),
+            title: videoInfo.title,
+            thumbnail: videoInfo.thumbnail,
+            durationFormatted: videoInfo.durationFormatted,
+            qualityLabel: opt.label,
+            formatId: opt.formatId,
+            status: 'downloading',
+            percent: 42,
+            speed: '8.4 MB/s',
+            eta: '00:45',
+            totalSize: '380 MB',
+          },
+        ]);
+      }
 
       setActiveTab('queue');
       setVideoInfo(null);
@@ -373,12 +568,6 @@ export const App: React.FC = () => {
   const handleUpdateConcurrency = async (val: number) => {
     const updated = await window.api.updateSettings({ maxConcurrent: val });
     setSettings(updated);
-  };
-
-  const handleToggleTheme = async (theme: 'dark' | 'light') => {
-    const updated = await window.api.updateSettings({ theme });
-    setSettings(updated);
-    document.documentElement.setAttribute('data-theme', theme);
   };
 
   const handleDeleteHistory = async (id: string) => {
@@ -431,234 +620,129 @@ export const App: React.FC = () => {
     }
   };
 
-  const activeDownloadsCount = queue.filter((i) => i.status === 'downloading' || i.status === 'queued').length;
+  const activeDownloadsCount = queue.filter(
+    (i) => i.status === 'downloading' || i.status === 'queued'
+  ).length;
+
+  const engineStatus =
+    fetchState === 'loading'
+      ? 'Checking link…'
+      : activeDownloadsCount > 0
+        ? `${activeDownloadsCount} downloading`
+        : 'Ready to download';
+
+  const navItems: { id: ActiveTab; label: string }[] = [
+    { id: 'downloader', label: 'Download' },
+    { id: 'queue', label: 'Queue' },
+    { id: 'history', label: 'History' },
+    { id: 'settings', label: 'Settings' },
+  ];
+
+  const isPreview = fetchState === 'preview' && videoInfo !== null;
 
   return (
-    <div className="app-container" id="app-root">
+    <div className="app-shell" id="app-root">
       {/* First-Run Onboarding Modal */}
       <OnboardingModal isOpen={showOnboarding} onClose={handleCloseOnboarding} />
 
-      {/* Title Bar with Navigation Tabs */}
-      <header className="titlebar" id="app-titlebar">
-        <div className="titlebar-brand">
-          <div className="titlebar-logo-icon">
-            <ArrowDownToLine size={16} />
-          </div>
-          <span className="titlebar-title">Universal Downloader</span>
-        </div>
+      {/* Aurora backdrop — fixed, behind all content */}
+      <div className="aurora" aria-hidden="true">
+        <div className="aurora-glow" />
+        <div className="aurora-streaks" />
+        <svg className="aurora-waves" viewBox="0 0 1200 200" preserveAspectRatio="none">
+          <path d="M0,120 C150,40 300,40 450,110 C600,180 750,170 900,100 C1020,45 1120,60 1200,90" />
+          <path d="M0,150 C200,190 350,70 550,90 C750,110 850,190 1050,150 C1120,135 1170,120 1200,115" />
+          <path d="M0,90 C180,140 320,160 500,130 C700,95 820,60 1000,85 C1100,100 1160,125 1200,135" />
+        </svg>
+      </div>
 
-        {/* Navigation Tabs */}
-        <nav className="nav-tabs" id="navigation-tabs">
-          <button
-            id="tab-downloader"
-            type="button"
-            className={`nav-tab-btn ${activeTab === 'downloader' ? 'active' : ''}`}
-            onClick={() => setActiveTab('downloader')}
-          >
-            <Download size={14} />
-            <span>Downloader</span>
-          </button>
+      {/* Top bar */}
+      <header className="topbar" id="app-titlebar">
+        <img className="topbar-logo" src={logoUrl} alt="Universal Downloader" draggable={false} />
 
-          <button
-            id="tab-queue"
-            type="button"
-            className={`nav-tab-btn ${activeTab === 'queue' ? 'active' : ''}`}
-            onClick={() => setActiveTab('queue')}
-          >
-            <ListOrdered size={14} />
-            <span>Queue</span>
-            {activeDownloadsCount > 0 && (
-              <span className="tab-badge" id="queue-count-badge">
-                {activeDownloadsCount}
-              </span>
-            )}
-          </button>
-
-          <button
-            id="tab-history"
-            type="button"
-            className={`nav-tab-btn ${activeTab === 'history' ? 'active' : ''}`}
-            onClick={() => setActiveTab('history')}
-          >
-            <HistoryIcon size={14} />
-            <span>History</span>
-            {history.length > 0 && (
-              <span className="tab-badge" id="history-count-badge">
-                {history.length}
-              </span>
-            )}
-          </button>
-
-          <button
-            id="tab-settings"
-            type="button"
-            className={`nav-tab-btn ${activeTab === 'settings' ? 'active' : ''}`}
-            onClick={() => setActiveTab('settings')}
-          >
-            <SettingsIcon size={14} />
-            <span>Settings</span>
-          </button>
+        <nav className="topbar-nav" id="navigation-tabs">
+          {navItems.map((n) => (
+            <button
+              key={n.id}
+              id={`tab-${n.id}`}
+              type="button"
+              className={`topbar-link ${activeTab === n.id ? 'active' : ''}`}
+              onClick={() => setActiveTab(n.id)}
+            >
+              {n.label}
+            </button>
+          ))}
         </nav>
 
-        {/* System Pill */}
-        <div className="titlebar-right">
-          <div className="system-pill" id="app-system-status">
-            <span className="status-dot" />
-            <span>{appInfo ? `${appInfo.platform} (${appInfo.arch})` : 'Desktop Ready'}</span>
-          </div>
+        <div className="topbar-status" id="app-system-status">
+          <span
+            className={`topbar-status-dot ${fetchState === 'loading' || activeDownloadsCount > 0 ? 'busy' : ''}`}
+          />
+          <span>{engineStatus}</span>
         </div>
       </header>
 
-      {/* Main Container */}
-      <main className="main-content" id="app-main-content">
+      {/* Scrolling content column */}
+      <main className="main-scroll" id="app-main-content">
         {/* TAB 1: DOWNLOADER */}
         {activeTab === 'downloader' && (
-          <>
-            <section className="hero-section">
-              <h1 className="hero-title">Download Any Video or Audio Stream</h1>
-              <p className="hero-subtitle">
-                Paste a media link from YouTube, Pinterest, Vimeo, or any supported site.
-              </p>
-            </section>
+          <section className="download-screen" id="url-input-card">
+            <h1 className="hero-title">Download Any Video, Anywhere</h1>
+            <p className="hero-subtitle">
+              Paste a link from YouTube, Pinterest, TikTok and 1,800+ sites.
+            </p>
 
-            {/* URL Input Box */}
-            <section className="url-card" id="url-input-card">
-              <div className="url-input-row">
-                <span className="url-icon">
-                  <LinkIcon size={18} />
-                </span>
+            <div className={`input-card ${isPreview ? 'expanded' : ''}`} id="download-input-card">
+              {/* URL field */}
+              <div className="input-card-url-row">
                 <input
                   id="main-url-input"
                   type="text"
-                  className="main-url-input"
-                  placeholder="Paste media link here (e.g., https://www.youtube.com/watch?v=...)"
+                  className="input-card-url"
+                  placeholder="Paste a video link..."
                   value={url}
                   onChange={(e) => setUrl(e.target.value)}
                   onKeyDown={(e) => {
                     if (e.key === 'Enter') handleFetch();
                   }}
                   disabled={fetchState === 'loading'}
+                  spellCheck={false}
+                  autoFocus
                 />
                 <button
                   id="btn-paste-clipboard"
                   type="button"
-                  className="btn-paste"
+                  className="input-card-paste"
                   onClick={handlePaste}
                   disabled={fetchState === 'loading'}
+                  title="Paste from clipboard"
                 >
-                  <Clipboard size={14} />
+                  <Clipboard size={13} />
                   <span>Paste</span>
                 </button>
-                <button
-                  id="btn-fetch-url"
-                  type="button"
-                  className="btn-fetch"
-                  onClick={() => handleFetch()}
-                  disabled={!url.trim() || fetchState === 'loading'}
-                >
-                  {fetchState === 'loading' ? (
-                    <>
-                      <Activity size={15} className="spin-icon" />
-                      <span>Fetching...</span>
-                    </>
-                  ) : (
-                    <>
-                      <Download size={15} />
-                      <span>Fetch</span>
-                    </>
-                  )}
-                </button>
               </div>
 
-              {/* Controls Meta Row */}
-              <div className="controls-meta-row">
-                <div className="folder-selector" id="folder-selector-container">
-                  <Folder size={14} color="var(--accent-primary)" />
-                  <span>Save to:</span>
-                  <span className="folder-path-text" title={settings.downloadFolder}>
-                    {settings.downloadFolder || 'Default Downloads'}
-                  </span>
-                  <button
-                    id="btn-change-folder"
-                    type="button"
-                    className="btn-change-folder"
-                    onClick={handleChooseFolder}
-                  >
-                    Change
-                  </button>
-                </div>
-
-                <div className="presets-container" id="quick-presets-container">
-                  <span style={{ color: 'var(--text-muted)' }}>Presets:</span>
-                  <button
-                    id="preset-youtube-btn"
-                    type="button"
-                    className="preset-pill"
-                    onClick={() => {
-                      setUrl('https://www.youtube.com/watch?v=jNQXAC9IVRw');
-                      handleFetch('https://www.youtube.com/watch?v=jNQXAC9IVRw');
-                    }}
-                    disabled={fetchState === 'loading'}
-                  >
-                    <PlayCircle size={12} color="#ef4444" />
-                    <span>YouTube</span>
-                  </button>
-                  <button
-                    id="preset-pinterest-btn"
-                    type="button"
-                    className="preset-pill"
-                    onClick={() => {
-                      setUrl('https://www.pinterest.com/pin/664281013778109217/');
-                      handleFetch('https://www.pinterest.com/pin/664281013778109217/');
-                    }}
-                    disabled={fetchState === 'loading'}
-                  >
-                    <Bookmark size={12} color="#e60023" />
-                    <span>Pinterest</span>
-                  </button>
-                </div>
-              </div>
-            </section>
-
-            {/* Loading State */}
-            {fetchState === 'loading' && (
-              <section className="loading-card" id="state-loading-card">
-                <div className="loading-spinner-container">
-                  <div className="spinner-ring" />
-                </div>
-                <div>
-                  <h2 className="loading-title">Analyzing Media Link...</h2>
-                  <p className="loading-subtitle">
-                    Probing video streams, available resolutions, and audio tracks via yt-dlp.
-                  </p>
-                </div>
-              </section>
-            )}
-
-            {/* Error State */}
-            {fetchState === 'error' && (
-              <section className="error-card" id="state-error-card">
-                <div className="error-main-row">
-                  <div className="error-icon-box">
-                    <AlertTriangle size={20} />
+              {/* Loading shimmer */}
+              {fetchState === 'loading' && (
+                <div className="input-card-loading" id="state-loading-card">
+                  <div className="shimmer-thumb" />
+                  <div className="shimmer-lines">
+                    <div className="shimmer-line" />
+                    <div className="shimmer-line short" />
                   </div>
-                  <div className="error-content">
-                    <h3 className="error-title">Extraction Error</h3>
-                    <p className="error-message">{errorMessage}</p>
+                </div>
+              )}
 
-                    <div
-                      style={{
-                        display: 'flex',
-                        alignItems: 'center',
-                        gap: '10px',
-                        flexWrap: 'wrap',
-                        marginTop: '10px',
-                      }}
-                    >
+              {/* Error — inline inside the card */}
+              {fetchState === 'error' && (
+                <div className="input-card-error" id="state-error-card">
+                  <AlertTriangle size={15} className="input-card-error-icon" />
+                  <div className="input-card-error-body">
+                    <p className="input-card-error-msg">{errorMessage}</p>
+                    <div className="input-card-error-links">
                       <button
                         id="btn-open-log-file"
                         type="button"
-                        className="error-details-toggle"
                         onClick={async () => {
                           try {
                             await window.api.openLogFile();
@@ -666,623 +750,598 @@ export const App: React.FC = () => {
                             console.error('Could not open log file:', e);
                           }
                         }}
-                        style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}
                       >
-                        <FolderOpen size={14} />
-                        <span>Open Log File</span>
+                        Open log file
                       </button>
-
                       {rawErrorDetails && (
                         <button
                           id="btn-toggle-error-details"
                           type="button"
-                          className="error-details-toggle"
                           onClick={() => setShowErrorDetails(!showErrorDetails)}
-                          style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}
                         >
-                          {showErrorDetails ? (
-                            <>
-                              <ChevronUp size={14} />
-                              <span>Hide technical details</span>
-                            </>
-                          ) : (
-                            <>
-                              <ChevronDown size={14} />
-                              <span>View technical details</span>
-                            </>
-                          )}
+                          {showErrorDetails ? 'Hide details' : 'Technical details'}
                         </button>
                       )}
                     </div>
-
                     {rawErrorDetails && showErrorDetails && (
-                      <div className="error-details-box" id="error-details-content">
+                      <pre className="input-card-error-details" id="error-details-content">
                         {rawErrorDetails}
-                      </div>
+                      </pre>
                     )}
                   </div>
                 </div>
-              </section>
-            )}
+              )}
 
-            {/* Preview State */}
-            {fetchState === 'preview' && videoInfo && (
-              <section className="preview-card" id="state-preview-card">
-                <div className="preview-main-info">
-                  <div className="preview-thumb-container">
+              {/* Preview — expands inside the same card */}
+              {isPreview && videoInfo && (
+                <div className="input-card-preview" id="state-preview-card">
+                  <div className="input-card-thumb">
                     {videoInfo.thumbnail ? (
-                      <img
-                        src={videoInfo.thumbnail}
-                        alt={videoInfo.title}
-                        className="preview-thumb"
-                      />
+                      <img src={videoInfo.thumbnail} alt="" />
                     ) : (
-                      <div
-                        style={{
-                          height: '100%',
-                          display: 'flex',
-                          alignItems: 'center',
-                          justifyContent: 'center',
-                        }}
-                      >
-                        <VideoIcon size={38} color="var(--text-muted)" />
-                      </div>
+                      <VideoIcon size={22} />
                     )}
                     {videoInfo.duration > 0 && (
-                      <span className="preview-duration-badge">
-                        <Clock size={11} />
-                        <span>{videoInfo.durationFormatted}</span>
-                      </span>
+                      <span className="input-card-duration">{videoInfo.durationFormatted}</span>
                     )}
                   </div>
-
-                  <div className="preview-meta">
-                    <h2 className="preview-title">{videoInfo.title}</h2>
-                    <div className="preview-uploader-row">
-                      <span className="preview-uploader-badge">
-                        <User size={13} />
-                        <span>{videoInfo.uploader}</span>
-                      </span>
-                      <a
-                        href={videoInfo.webpageUrl}
-                        target="_blank"
-                        rel="noreferrer"
-                        style={{
-                          display: 'inline-flex',
-                          alignItems: 'center',
-                          gap: 4,
-                          color: 'var(--text-muted)',
-                          textDecoration: 'none',
-                        }}
-                      >
-                        <span>Source</span>
-                        <ExternalLink size={12} />
+                  <div className="input-card-meta">
+                    <h2 className="input-card-title" title={videoInfo.title}>
+                      {videoInfo.title}
+                    </h2>
+                    <div className="input-card-sub">
+                      {videoInfo.uploader && <span>{videoInfo.uploader}</span>}
+                      {videoInfo.duration > 0 && <span>{videoInfo.durationFormatted}</span>}
+                      <a href={videoInfo.webpageUrl} target="_blank" rel="noreferrer">
+                        Source <ExternalLink size={10} />
                       </a>
                     </div>
                   </div>
                 </div>
+              )}
 
-                {/* Quality Selector */}
-                <div className="format-section">
-                  <div className="format-section-header">
-                    <span className="format-section-title">
-                      <Layers size={14} color="var(--accent-primary)" />
-                      Select Quality &amp; Format:
-                    </span>
-                    <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
-                      Auto-merges audio &amp; video via FFmpeg
-                    </span>
-                  </div>
-
-                  <div className="format-grid" id="format-selection-grid">
+              {/* Pill row + primary action */}
+              <div className="input-card-actions">
+                {isPreview && (
+                  <div className="input-card-pills" id="format-selection-grid">
                     {friendlyOptions.map((opt) => (
                       <button
                         key={opt.id}
                         id={`format-opt-${opt.id}`}
                         type="button"
-                        className={`format-card-btn ${selectedOptionId === opt.id ? 'selected' : ''}`}
+                        className={`light-pill ${selectedOptionId === opt.id ? 'selected' : ''}`}
                         onClick={() => setSelectedOptionId(opt.id)}
+                        title={`${opt.label} · ${opt.ext.toUpperCase()}${opt.needsMerge ? ' · merges audio' : ''}`}
                       >
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                          {opt.isAudioOnly ? (
-                            <Music size={14} color="var(--accent-secondary)" />
-                          ) : (
-                            <VideoIcon size={14} color="var(--accent-primary)" />
-                          )}
-                          <span className="format-card-label">{opt.label}</span>
-                        </div>
-                        <div className="format-card-details">
-                          <span>
-                            {opt.ext.toUpperCase()}
-                            {opt.filesizeFormatted ? ` • ${opt.filesizeFormatted}` : ''}
-                          </span>
-                          {opt.needsMerge && (
-                            <span className="format-merge-badge">+Audio</span>
-                          )}
-                        </div>
+                        <span>{shortOptionLabel(opt)}</span>
+                        {opt.filesizeFormatted && (
+                          <span className="light-pill-meta">{opt.filesizeFormatted}</span>
+                        )}
                       </button>
                     ))}
                   </div>
-                </div>
+                )}
 
-                {/* Bottom Actions Row */}
-                <div className="preview-action-row">
-                  <div className="destination-info">
-                    <FolderOpen size={15} color="var(--accent-primary)" />
-                    <span>Destination:</span>
-                    <span style={{ color: 'var(--text-primary)', fontFamily: 'var(--font-mono)' }}>
-                      {settings.downloadFolder || 'Default Downloads'}
-                    </span>
-                  </div>
-
+                {isPreview ? (
                   <button
                     id="btn-add-to-queue"
                     type="button"
-                    className="btn-start-download"
+                    className="dark-pill"
                     onClick={handleAddToQueue}
                   >
-                    <PlusCircle size={16} />
-                    <span>Add to Queue &amp; Download</span>
+                    Download
                   </button>
-                </div>
-              </section>
+                ) : (
+                  <button
+                    id="btn-fetch-url"
+                    type="button"
+                    className="dark-pill"
+                    onClick={() => handleFetch()}
+                    disabled={!url.trim() || fetchState === 'loading'}
+                  >
+                    {fetchState === 'loading' ? (
+                      <>
+                        <Activity size={14} className="spin-icon" />
+                        <span>Fetching</span>
+                      </>
+                    ) : (
+                      'Fetch'
+                    )}
+                  </button>
+                )}
+              </div>
+            </div>
+
+            <div className="save-line" id="folder-selector-container">
+              <span className="save-line-dot" />
+              <span>Saving to</span>
+              <span className="save-line-path" title={settings.downloadFolder}>
+                {settings.downloadFolder || 'Default Downloads'}
+              </span>
+              <span className="save-line-sep">·</span>
+              <button
+                id="btn-change-folder"
+                type="button"
+                className="save-line-change"
+                onClick={handleChooseFolder}
+              >
+                Change
+              </button>
+            </div>
+
+            {publicStats && (
+              <div className="stats-line" id="public-stats-row" aria-live="polite">
+                <span>
+                  <strong>{publicStats.totalDownloads.toLocaleString()}</strong>{' '}
+                  {publicStats.totalDownloads === 1 ? 'video' : 'videos'} downloaded
+                </span>
+                <span className="stats-line-sep">·</span>
+                <span>
+                  <strong>{publicStats.activeUsers.last24Hours.toLocaleString()}</strong>{' '}
+                  {publicStats.activeUsers.last24Hours === 1 ? 'person' : 'people'} online
+                </span>
+                <span className="stats-line-sep">·</span>
+                <span className="stats-line-live">
+                  <span className="stats-live-dot" aria-hidden="true" />
+                  <strong>{publicStats.activeUsers.last5Minutes.toLocaleString()}</strong>{' '}
+                  downloading now
+                </span>
+              </div>
             )}
-          </>
+          </section>
         )}
 
         {/* TAB 2: QUEUE */}
         {activeTab === 'queue' && (
-          <div className="queue-container" id="queue-view-container">
-            <div className="view-header">
-              <div className="view-title-group">
-                <h2 className="view-title">Download Queue</h2>
-                <p className="view-subtitle">
-                  {queue.filter((i) => i.status === 'downloading').length} active,{' '}
-                  {queue.filter((i) => i.status === 'queued').length} waiting (Max concurrent: {settings.maxConcurrent})
-                </p>
-              </div>
+          <section className="page page-fixed-header" id="queue-view-container">
+            <header className="page-header">
+              <h1 className="page-title">Queue</h1>
+              <p className="page-subtitle">
+                {queue.filter((i) => i.status === 'downloading').length} active ·{' '}
+                {queue.filter((i) => i.status === 'queued').length} waiting · up to{' '}
+                {settings.maxConcurrent} at once
+              </p>
+            </header>
 
-              {queue.some((i) => i.status === 'completed' || i.status === 'canceled' || i.status === 'failed') && (
+            {queue.some(
+              (i) => i.status === 'completed' || i.status === 'canceled' || i.status === 'failed'
+            ) && (
+              <div className="page-toolbar">
                 <button
                   id="btn-clear-completed-queue"
                   type="button"
-                  className="btn-secondary"
+                  className="glass-pill"
                   onClick={handleClearCompleted}
                 >
                   <Trash2 size={13} />
-                  <span>Clear Completed</span>
-                </button>
-              )}
-            </div>
-
-            {queue.length === 0 ? (
-              <div className="empty-tab-state" id="empty-queue-state">
-                <div className="empty-icon-circle">
-                  <ListOrdered size={28} />
-                </div>
-                <h3 style={{ fontSize: '16px', fontWeight: 600 }}>Queue is Empty</h3>
-                <p style={{ fontSize: '13px', color: 'var(--text-secondary)', maxWidth: 360 }}>
-                  Add downloads from the Downloader tab. Downloads will automatically queue and execute according to your concurrency limits.
-                </p>
-                <button
-                  type="button"
-                  className="btn-fetch"
-                  style={{ marginTop: 8 }}
-                  onClick={() => setActiveTab('downloader')}
-                >
-                  Go to Downloader
+                  <span>Clear finished</span>
                 </button>
               </div>
-            ) : (
-              queue.map((item) => (
-                <div
-                  key={item.id}
-                  id={`queue-item-${item.id}`}
-                  className={`queue-card ${item.status === 'downloading' ? 'active-card' : ''}`}
-                >
-                  <div className="queue-header-row">
-                    <img
-                      src={item.thumbnail || ''}
-                      alt={item.title}
-                      className="queue-thumb"
-                    />
-                    <div className="queue-meta">
-                      <div className="queue-title">{item.title}</div>
-                      <div className="queue-subtext">
-                        <span className={`status-badge ${item.status}`}>
-                          {item.status.toUpperCase()}
-                        </span>
-                        <span>•</span>
-                        <span>{item.qualityLabel}</span>
-                        {item.durationFormatted && (
-                          <>
-                            <span>•</span>
-                            <span>{item.durationFormatted}</span>
-                          </>
+            )}
+
+            <div className="page-scroll">
+              {queue.length === 0 ? (
+                <div className="empty-state" id="empty-queue-state">
+                  <h3 className="empty-title">Nothing in the queue</h3>
+                  <p className="empty-subtitle">
+                    Downloads you start will appear here with live progress.
+                  </p>
+                  <button
+                    type="button"
+                    className="white-pill"
+                    onClick={() => setActiveTab('downloader')}
+                  >
+                    Go to Download
+                  </button>
+                </div>
+              ) : (
+                <div className="row-list">
+                  {queue.map((item) => (
+                    <div
+                      key={item.id}
+                      id={`queue-item-${item.id}`}
+                      className={`glass-row queue-row ${item.status === 'downloading' ? 'active' : ''}`}
+                    >
+                      <div className="row-main">
+                        {item.thumbnail ? (
+                          <img src={item.thumbnail} alt="" className="row-thumb" />
+                        ) : (
+                          <div className="row-thumb row-thumb-empty">
+                            <VideoIcon size={16} />
+                          </div>
                         )}
+                        <div className="row-meta">
+                          <div className="row-title" title={item.title}>
+                            {item.title}
+                          </div>
+                          <div className="row-sub">
+                            <span className={`status-badge ${item.status}`}>
+                              {item.status.toUpperCase()}
+                            </span>
+                            <span>{item.qualityLabel}</span>
+                            {item.durationFormatted && <span>{item.durationFormatted}</span>}
+                          </div>
+                        </div>
+
+                        <div className="row-actions">
+                          {item.status === 'downloading' && (
+                            <button
+                              id={`btn-pause-${item.id}`}
+                              type="button"
+                              className="icon-btn"
+                              title="Pause download"
+                              onClick={() => handlePauseQueueItem(item.id)}
+                            >
+                              <Pause size={14} />
+                            </button>
+                          )}
+                          {item.status === 'paused' && (
+                            <button
+                              id={`btn-resume-${item.id}`}
+                              type="button"
+                              className="icon-btn"
+                              title="Resume download"
+                              onClick={() => handleResumeQueueItem(item.id)}
+                            >
+                              <Play size={14} />
+                            </button>
+                          )}
+                          {(item.status === 'downloading' ||
+                            item.status === 'queued' ||
+                            item.status === 'paused') && (
+                            <button
+                              id={`btn-cancel-${item.id}`}
+                              type="button"
+                              className="icon-btn danger"
+                              title="Cancel download"
+                              onClick={() => handleCancelQueueItem(item.id)}
+                            >
+                              <XCircle size={14} />
+                            </button>
+                          )}
+                          {item.status === 'completed' && (
+                            <button
+                              type="button"
+                              className="icon-btn"
+                              title="Show in folder"
+                              onClick={() => handleOpenFile(item.outputPath)}
+                            >
+                              <FolderOpen size={14} />
+                            </button>
+                          )}
+                        </div>
+                      </div>
+
+                      {(item.status === 'downloading' ||
+                        item.status === 'paused' ||
+                        item.status === 'completed') && (
+                        <div className="progress-track">
+                          <div
+                            className={`progress-fill ${item.status}`}
+                            style={{ width: `${Math.round(item.percent)}%` }}
+                          />
+                        </div>
+                      )}
+
+                      <div className="row-stats">
+                        <span>{Math.round(item.percent)}%</span>
+                        {item.speed && <span>{item.speed}</span>}
+                        {item.eta && <span>ETA {item.eta}</span>}
+                        {item.totalSize && <span>{item.totalSize}</span>}
+                        {item.error && <span className="row-error">{item.error}</span>}
                       </div>
                     </div>
-
-                    {/* Controls per item */}
-                    <div className="queue-actions">
-                      {item.status === 'downloading' && (
-                        <button
-                          id={`btn-pause-${item.id}`}
-                          type="button"
-                          className="action-icon-btn"
-                          title="Pause Download"
-                          onClick={() => handlePauseQueueItem(item.id)}
-                        >
-                          <Pause size={14} />
-                        </button>
-                      )}
-
-                      {item.status === 'paused' && (
-                        <button
-                          id={`btn-resume-${item.id}`}
-                          type="button"
-                          className="action-icon-btn"
-                          title="Resume Download"
-                          onClick={() => handleResumeQueueItem(item.id)}
-                        >
-                          <Play size={14} />
-                        </button>
-                      )}
-
-                      {(item.status === 'downloading' || item.status === 'queued' || item.status === 'paused') && (
-                        <button
-                          id={`btn-cancel-${item.id}`}
-                          type="button"
-                          className="action-icon-btn danger"
-                          title="Cancel Download"
-                          onClick={() => handleCancelQueueItem(item.id)}
-                        >
-                          <XCircle size={14} />
-                        </button>
-                      )}
-
-                      {item.status === 'completed' && (
-                        <button
-                          type="button"
-                          className="action-icon-btn"
-                          title="Show in Folder"
-                          onClick={() => handleOpenFile(item.outputPath)}
-                        >
-                          <FolderOpen size={14} />
-                        </button>
-                      )}
-                    </div>
-                  </div>
-
-                  {/* Progress Bar for active item */}
-                  {(item.status === 'downloading' || item.status === 'paused' || item.status === 'completed') && (
-                    <div className="queue-progress-bar">
-                      <div
-                        className="queue-progress-fill"
-                        style={{ width: `${Math.round(item.percent)}%` }}
-                      />
-                    </div>
-                  )}
-
-                  {/* Stats Row */}
-                  <div className="queue-stats-row">
-                    <span>{Math.round(item.percent)}% Complete</span>
-                    {item.speed && <span>Speed: {item.speed}</span>}
-                    {item.eta && <span>ETA: {item.eta}</span>}
-                    {item.totalSize && <span>Size: {item.totalSize}</span>}
-                    {item.error && (
-                      <span style={{ color: 'var(--danger-text)' }}>{item.error}</span>
-                    )}
-                  </div>
+                  ))}
                 </div>
-              ))
-            )}
-          </div>
+              )}
+            </div>
+          </section>
         )}
 
         {/* TAB 3: HISTORY */}
         {activeTab === 'history' && (
-          <div className="history-container" id="history-view-container">
-            <div className="view-header">
-              <div className="view-title-group">
-                <h2 className="view-title">Download History</h2>
-                <p className="view-subtitle">
-                  {history.length} recorded items stored permanently
-                </p>
-              </div>
+          <section className="page page-fixed-header" id="history-view-container">
+            <header className="page-header">
+              <h1 className="page-title">History</h1>
+              <p className="page-subtitle">
+                {history.length} {history.length === 1 ? 'download' : 'downloads'} saved across
+                restarts
+              </p>
+            </header>
 
-              {history.length > 0 && (
+            {history.length > 0 && (
+              <div className="page-toolbar">
                 <button
                   id="btn-clear-all-history"
                   type="button"
-                  className="btn-secondary"
+                  className="glass-pill"
                   onClick={handleClearAllHistory}
                 >
                   <Trash2 size={13} />
-                  <span>Clear All History</span>
+                  <span>Clear history</span>
                 </button>
+              </div>
+            )}
+
+            <div className="page-scroll">
+              {history.length === 0 ? (
+                <div className="empty-state" id="empty-history-state">
+                  <h3 className="empty-title">No downloads yet</h3>
+                  <p className="empty-subtitle">
+                    Finished, failed and canceled downloads are kept here.
+                  </p>
+                  <button
+                    type="button"
+                    className="white-pill"
+                    onClick={() => setActiveTab('downloader')}
+                  >
+                    Go to Download
+                  </button>
+                </div>
+              ) : (
+                <div className="row-list">
+                  {history.map((item) => (
+                    <div
+                      key={item.id}
+                      id={`history-item-${item.id}`}
+                      className="glass-row history-row"
+                    >
+                      <div className="row-main">
+                        {item.thumbnail ? (
+                          <img src={item.thumbnail} alt="" className="row-thumb" />
+                        ) : (
+                          <div className="row-thumb row-thumb-empty">
+                            <VideoIcon size={16} />
+                          </div>
+                        )}
+                        <div className="row-meta">
+                          <div className="row-title" title={item.title}>
+                            {item.title}
+                          </div>
+                          <div className="row-sub">
+                            <span className={`status-badge ${item.status}`}>
+                              {item.status.toUpperCase()}
+                            </span>
+                            <span>{item.date}</span>
+                            <span>{item.quality}</span>
+                            {item.fileSizeFormatted && <span>{item.fileSizeFormatted}</span>}
+                          </div>
+                        </div>
+
+                        <div className="row-actions">
+                          {item.status === 'completed' && (
+                            <button
+                              id={`btn-history-folder-${item.id}`}
+                              type="button"
+                              className="icon-btn"
+                              title="Show in folder"
+                              onClick={() => handleOpenFile(item.filePath)}
+                            >
+                              <FolderOpen size={14} />
+                            </button>
+                          )}
+                          <button
+                            id={`btn-history-redownload-${item.id}`}
+                            type="button"
+                            className="icon-btn"
+                            title="Download again"
+                            onClick={() => handleRedownloadHistory(item)}
+                          >
+                            <RotateCcw size={14} />
+                          </button>
+                          <button
+                            id={`btn-history-delete-${item.id}`}
+                            type="button"
+                            className="icon-btn danger"
+                            title="Remove from history"
+                            onClick={() => handleDeleteHistory(item.id)}
+                          >
+                            <Trash2 size={14} />
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
               )}
             </div>
-
-            {history.length === 0 ? (
-              <div className="empty-tab-state" id="empty-history-state">
-                <div className="empty-icon-circle">
-                  <HistoryIcon size={28} />
-                </div>
-                <h3 style={{ fontSize: '16px', fontWeight: 600 }}>No Download History</h3>
-                <p style={{ fontSize: '13px', color: 'var(--text-secondary)', maxWidth: 360 }}>
-                  Completed, failed, and canceled downloads will appear here and persist across application restarts.
-                </p>
-              </div>
-            ) : (
-              history.map((item) => (
-                <div key={item.id} id={`history-item-${item.id}`} className="history-card">
-                  <img
-                    src={item.thumbnail || ''}
-                    alt={item.title}
-                    className="history-thumb"
-                  />
-                  <div className="history-meta">
-                    <div className="history-title">{item.title}</div>
-                    <div className="history-details">
-                      <span className={`status-badge ${item.status}`}>
-                        {item.status.toUpperCase()}
-                      </span>
-                      <span>{item.date}</span>
-                      <span>•</span>
-                      <span>{item.quality}</span>
-                      {item.fileSizeFormatted && (
-                        <>
-                          <span>•</span>
-                          <span>{item.fileSizeFormatted}</span>
-                        </>
-                      )}
-                    </div>
-                  </div>
-
-                  <div className="history-actions">
-                    {item.status === 'completed' && (
-                      <button
-                        id={`btn-history-folder-${item.id}`}
-                        type="button"
-                        className="action-icon-btn"
-                        title="Show in Folder"
-                        onClick={() => handleOpenFile(item.filePath)}
-                      >
-                        <FolderOpen size={14} />
-                      </button>
-                    )}
-
-                    <button
-                      id={`btn-history-redownload-${item.id}`}
-                      type="button"
-                      className="action-icon-btn"
-                      title="Re-download Video"
-                      onClick={() => handleRedownloadHistory(item)}
-                    >
-                      <RotateCcw size={14} />
-                    </button>
-
-                    <button
-                      id={`btn-history-delete-${item.id}`}
-                      type="button"
-                      className="action-icon-btn danger"
-                      title="Delete History Entry"
-                      onClick={() => handleDeleteHistory(item.id)}
-                    >
-                      <Trash2 size={14} />
-                    </button>
-                  </div>
-                </div>
-              ))
-            )}
-          </div>
+          </section>
         )}
 
         {/* TAB 4: SETTINGS */}
         {activeTab === 'settings' && (
-          <div className="settings-container" id="settings-view-container">
-            <div className="view-header">
-              <div className="view-title-group">
-                <h2 className="view-title">Application Settings</h2>
-                <p className="view-subtitle">
-                  Configure download directories, concurrent tasks, interface theme, and diagnostics
-                </p>
-              </div>
-            </div>
+          <section className="page page-fixed-header" id="settings-view-container">
+            <header className="page-header">
+              <h1 className="page-title">Settings</h1>
+              <p className="page-subtitle">
+                Where files go, how many run at once, and support tools.
+              </p>
+            </header>
 
-            <div className="settings-card">
-              {/* Default Folder */}
-              <div className="setting-row">
-                <div className="setting-info">
-                  <span className="setting-label">Default Download Directory</span>
-                  <span className="setting-desc">
-                    Folder where media downloads are saved by default
-                  </span>
-                  <span
-                    style={{
-                      fontFamily: 'var(--font-mono)',
-                      fontSize: '12px',
-                      color: 'var(--text-primary)',
-                      marginTop: 4,
-                    }}
-                  >
-                    {settings.downloadFolder}
-                  </span>
-                </div>
-                <button
-                  id="btn-settings-choose-folder"
-                  type="button"
-                  className="btn-secondary"
-                  onClick={handleChooseFolder}
-                >
-                  <FolderOpen size={14} />
-                  <span>Browse Folder...</span>
-                </button>
-              </div>
-
-              {/* Concurrency Limit */}
-              <div className="setting-row">
-                <div className="setting-info">
-                  <span className="setting-label">Max Concurrent Downloads</span>
-                  <span className="setting-desc">
-                    Maximum number of video streams downloaded simultaneously
-                  </span>
-                </div>
-                <div className="concurrency-picker" id="concurrency-picker">
-                  {[1, 2, 3, 4, 5].map((val) => (
+            <div className="page-scroll settings-scroll">
+              <div className="settings-group">
+                <h2 className="settings-group-label">Downloads</h2>
+                <div className="glass-section">
+                  <div className="setting-row">
+                    <div className="setting-info">
+                      <span className="setting-label">Download folder</span>
+                      <span className="setting-desc setting-mono" title={settings.downloadFolder}>
+                        {settings.downloadFolder || 'Default Downloads'}
+                      </span>
+                    </div>
                     <button
-                      key={val}
-                      id={`btn-concurrency-${val}`}
+                      id="btn-settings-choose-folder"
                       type="button"
-                      className={`concurrency-btn ${settings.maxConcurrent === val ? 'active' : ''}`}
-                      onClick={() => handleUpdateConcurrency(val)}
+                      className="glass-pill"
+                      onClick={handleChooseFolder}
                     >
-                      {val}
+                      <FolderOpen size={13} />
+                      <span>Change</span>
                     </button>
-                  ))}
+                  </div>
+
+                  <div className="setting-row">
+                    <div className="setting-info">
+                      <span className="setting-label">Max concurrent downloads</span>
+                      <span className="setting-desc">How many downloads run at the same time</span>
+                    </div>
+                    <div className="pill-group" id="concurrency-picker">
+                      {[1, 2, 3, 4, 5].map((val) => (
+                        <button
+                          key={val}
+                          id={`btn-concurrency-${val}`}
+                          type="button"
+                          className={`choice-pill ${settings.maxConcurrent === val ? 'selected' : ''}`}
+                          onClick={() => handleUpdateConcurrency(val)}
+                        >
+                          {val}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
                 </div>
               </div>
 
-              {/* Theme Toggle */}
-              <div className="setting-row">
-                <div className="setting-info">
-                  <span className="setting-label">Interface Theme</span>
-                  <span className="setting-desc">
-                    Switch between sleek Dark Mode and high-contrast Light Mode
-                  </span>
-                </div>
-                <div className="theme-toggle-group" id="theme-toggle-group">
-                  <button
-                    id="btn-theme-dark"
-                    type="button"
-                    className={`theme-toggle-btn ${settings.theme === 'dark' ? 'active' : ''}`}
-                    onClick={() => handleToggleTheme('dark')}
-                  >
-                    <Moon size={14} />
-                    <span>Dark</span>
-                  </button>
-                  <button
-                    id="btn-theme-light"
-                    type="button"
-                    className={`theme-toggle-btn ${settings.theme === 'light' ? 'active' : ''}`}
-                    onClick={() => handleToggleTheme('light')}
-                  >
-                    <Sun size={14} />
-                    <span>Light</span>
-                  </button>
+              <div className="settings-group">
+                <h2 className="settings-group-label">Support</h2>
+                <div className="glass-section">
+                  <div className="setting-row">
+                    <div className="setting-info">
+                      <span className="setting-label">Diagnostics</span>
+                      <span className="setting-desc">
+                        Open the log or copy a system report for bug reports
+                      </span>
+                    </div>
+                    <div className="setting-controls">
+                      <button
+                        id="btn-open-log-file-settings"
+                        type="button"
+                        className="glass-pill"
+                        onClick={async () => {
+                          try {
+                            await window.api.openLogFile();
+                          } catch (e) {
+                            console.error('Could not open log file:', e);
+                          }
+                        }}
+                      >
+                        <FolderOpen size={13} />
+                        <span>Open log</span>
+                      </button>
+                      <button
+                        id="btn-copy-diagnostics"
+                        type="button"
+                        className="glass-pill"
+                        onClick={handleCopyDiagnostics}
+                      >
+                        {copiedDiagnostics ? (
+                          <>
+                            <CheckCircle2 size={13} className="text-success" />
+                            <span>Copied</span>
+                          </>
+                        ) : (
+                          <>
+                            <Copy size={13} />
+                            <span>Copy report</span>
+                          </>
+                        )}
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="setting-row">
+                    <div className="setting-info">
+                      <span className="setting-label">App updates</span>
+                      <span className="setting-desc">
+                        {updateStatus.status === 'available'
+                          ? `Version ${updateStatus.version} is available`
+                          : updateStatus.status === 'not-available'
+                            ? `Up to date (v${updateStatus.version || appInfo?.version})`
+                            : 'Checks GitHub Releases. yt-dlp updates on its own.'}
+                      </span>
+                    </div>
+                    <button
+                      id="btn-check-updates"
+                      type="button"
+                      className="glass-pill"
+                      onClick={handleCheckUpdates}
+                      disabled={isCheckingUpdate}
+                    >
+                      <RefreshCw size={13} className={isCheckingUpdate ? 'spin-icon' : ''} />
+                      <span>{isCheckingUpdate ? 'Checking' : 'Check now'}</span>
+                    </button>
+                  </div>
+
+                  <div className="setting-row">
+                    <div className="setting-info">
+                      <span className="setting-label">Welcome guide</span>
+                      <span className="setting-desc">
+                        Re-read the intro and responsible-use notice
+                      </span>
+                    </div>
+                    <button
+                      id="btn-reopen-onboarding"
+                      type="button"
+                      className="glass-pill"
+                      onClick={() => setShowOnboarding(true)}
+                    >
+                      <HelpCircle size={13} />
+                      <span>Open guide</span>
+                    </button>
+                  </div>
                 </div>
               </div>
 
-              {/* Diagnostics & Support */}
-              <div className="setting-row">
-                <div className="setting-info">
-                  <span className="setting-label">Support &amp; Diagnostics</span>
-                  <span className="setting-desc">
-                    Export system metadata and logs to clipboard for bug reporting and support
-                  </span>
-                </div>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                  <button
-                    id="btn-open-log-file-settings"
-                    type="button"
-                    className="btn-secondary"
-                    onClick={async () => {
-                      try {
-                        await window.api.openLogFile();
-                      } catch (e) {
-                        console.error('Could not open log file:', e);
-                      }
-                    }}
-                  >
-                    <FolderOpen size={14} />
-                    <span>Open Log File</span>
-                  </button>
-                  <button
-                    id="btn-copy-diagnostics"
-                    type="button"
-                    className="btn-secondary"
-                    onClick={handleCopyDiagnostics}
-                  >
-                    {copiedDiagnostics ? (
-                      <>
-                        <CheckCircle2 size={14} color="var(--success-text)" />
-                        <span style={{ color: 'var(--success-text)' }}>Diagnostics Copied!</span>
-                      </>
-                    ) : (
-                      <>
-                        <Copy size={14} />
-                        <span>Copy Diagnostics</span>
-                      </>
-                    )}
-                  </button>
-                </div>
-              </div>
+              <div className="settings-group">
+                <h2 className="settings-group-label">About</h2>
+                <div className="glass-section">
+                  <div className="setting-row">
+                    <div className="setting-info">
+                      <span className="setting-label">
+                        Universal Downloader {appInfo ? `v${appInfo.version}` : ''}
+                      </span>
+                      <span className="about-tagline">
+                        A fast, free downloader for YouTube, Pinterest, TikTok and 1,800+ other
+                        sites.
+                      </span>
+                    </div>
+                  </div>
 
-              {/* Auto Updates */}
-              <div className="setting-row">
-                <div className="setting-info">
-                  <span className="setting-label">Application Auto-Updates</span>
-                  <span className="setting-desc">
-                    Check GitHub Releases for new desktop app versions (Engine yt-dlp updates independently)
-                  </span>
-                  {updateStatus.status === 'available' && (
-                    <span style={{ color: 'var(--success-text)', fontSize: '11px', marginTop: 2 }}>
-                      Update v{updateStatus.version} available!
-                    </span>
-                  )}
-                  {updateStatus.status === 'not-available' && (
-                    <span style={{ color: 'var(--text-muted)', fontSize: '11px', marginTop: 2 }}>
-                      App is up to date (v{updateStatus.version || appInfo?.version})
-                    </span>
-                  )}
-                </div>
-                <button
-                  id="btn-check-updates"
-                  type="button"
-                  className="btn-secondary"
-                  onClick={handleCheckUpdates}
-                  disabled={isCheckingUpdate}
-                >
-                  <RefreshCw size={14} className={isCheckingUpdate ? 'spin-icon' : ''} />
-                  <span>{isCheckingUpdate ? 'Checking...' : 'Check for Updates'}</span>
-                </button>
-              </div>
-
-              {/* First-Run Welcome Guide Reopen */}
-              <div className="setting-row">
-                <div className="setting-info">
-                  <span className="setting-label">Welcome &amp; Usage Guide</span>
-                  <span className="setting-desc">
-                    Re-read the introductory guide and responsible use guidelines
-                  </span>
-                </div>
-                <button
-                  id="btn-reopen-onboarding"
-                  type="button"
-                  className="btn-secondary"
-                  onClick={() => setShowOnboarding(true)}
-                >
-                  <HelpCircle size={14} />
-                  <span>View Welcome Guide</span>
-                </button>
-              </div>
-
-              {/* Runtime Info */}
-              <div className="setting-row">
-                <div className="setting-info">
-                  <span className="setting-label">Runtime Metadata</span>
-                  <span className="setting-desc">
-                    Universal Downloader v1.0.0 • Electron • Node.js • yt-dlp &amp; FFmpeg Static
-                  </span>
-                </div>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: '12px', color: 'var(--success-text)' }}>
-                  <CheckCircle2 size={15} />
-                  <span>Production Ready</span>
+                  <div className="setting-row">
+                    <div className="developer-info">
+                      <img src={developerPhotoUrl} alt="" className="developer-avatar" />
+                      <div className="setting-info">
+                        <span className="setting-desc">Developer</span>
+                        <span className="setting-label">Akash Makes</span>
+                      </div>
+                    </div>
+                    <div className="setting-controls">
+                      <button
+                        id="btn-developer-facebook"
+                        type="button"
+                        className="glass-pill"
+                        onClick={() => window.api.openExternal(DEVELOPER_LINKS.facebook)}
+                        aria-label="Akash Makes on Facebook"
+                      >
+                        <FacebookIcon />
+                        <span>Facebook</span>
+                      </button>
+                      <button
+                        id="btn-developer-tiktok"
+                        type="button"
+                        className="glass-pill"
+                        onClick={() => window.api.openExternal(DEVELOPER_LINKS.tiktok)}
+                        aria-label="Akash Makes on TikTok"
+                      >
+                        <TikTokIcon />
+                        <span>TikTok</span>
+                      </button>
+                    </div>
+                  </div>
                 </div>
               </div>
             </div>
-          </div>
+          </section>
         )}
       </main>
     </div>

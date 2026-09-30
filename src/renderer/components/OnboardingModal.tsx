@@ -1,6 +1,6 @@
 import React from 'react';
+import logoUrl from '../assets/logo.png';
 import {
-  ArrowDownToLine,
   Zap,
   Layers,
   ShieldCheck,
@@ -21,9 +21,7 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({ isOpen, onClos
       <div className="onboarding-card" id="onboarding-modal-card">
         {/* Header Branding */}
         <div className="onboarding-header">
-          <div className="onboarding-logo-icon">
-            <ArrowDownToLine size={28} />
-          </div>
+          <img className="onboarding-logo" src={logoUrl} alt="" draggable={false} />
           <h2 className="onboarding-title">Welcome to Universal Downloader</h2>
           <p className="onboarding-subtitle">
             High-performance, multi-stream media downloader for videos, audio, and playlists.
@@ -34,7 +32,7 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({ isOpen, onClos
         <div className="onboarding-features-list">
           <div className="onboarding-feature-item">
             <div className="feature-icon-box">
-              <Zap size={18} color="var(--accent-primary)" />
+              <Zap size={18} color="var(--aurora-blue)" />
             </div>
             <div className="feature-text">
               <span className="feature-name">Fast &amp; Resumable Downloads</span>
@@ -46,7 +44,7 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({ isOpen, onClos
 
           <div className="onboarding-feature-item">
             <div className="feature-icon-box">
-              <Layers size={18} color="var(--accent-secondary)" />
+              <Layers size={18} color="#8ab8ff" />
             </div>
             <div className="feature-text">
               <span className="feature-name">Smart Format &amp; Audio Merging</span>
@@ -80,6 +78,10 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({ isOpen, onClos
             or permitted media. Users are solely responsible for ensuring they have the legal right
             and authorization to download any content. Please respect copyright laws and the terms of
             service of content providers.
+          </p>
+          <p className="disclaimer-body">
+            To show live stats, the app sends an anonymous, random ID when it runs and a count when a
+            download finishes. No personal data or download content is ever included.
           </p>
         </div>
 

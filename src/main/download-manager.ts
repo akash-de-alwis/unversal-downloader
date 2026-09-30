@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import YTDlpWrap from 'yt-dlp-wrap';
 import ffmpegPath from 'ffmpeg-static';
 import { logger } from './logger';
+import { MP3_BITRATE_KBPS } from '../shared/constants';
 import type {
   VideoMetadata,
   VideoFormat,
@@ -322,11 +323,10 @@ export class DownloadManager {
           if (!f.format_id || seenFormats.has(f.format_id)) continue;
           seenFormats.add(f.format_id);
 
-          const hasVideo = f.vcodec && f.vcodec !== 'none';
-          const hasAudio = f.acodec && f.acodec !== 'none';
+          const { hasVideo, hasAudio } = this.classifyStreams(f);
           const resolution =
             f.resolution ||
-            (f.width && f.height ? `${f.width}x${f.height}` : hasVideo ? 'video' : 'audio only');
+            (f.width && f.height ? `${f.width}x${f.height}` : hasVideo ? 'original' : 'audio only');
 
           const filesize = f.filesize || f.filesize_approx || undefined;
 
@@ -564,46 +564,78 @@ export class DownloadManager {
   }
 
   /**
-   * Detect whether a download source uses HLS (m3u8), DASH, or fragmented streaming.
-   * On fragmented sources, --http-chunk-size causes "Conflicting range" / HTTP 416
-   * because CDNs deliver individual segment files (.ts / .m4s) and reject byte-range
-   * requests on those segments.
+   * Detect whether a download source uses TRUE fragmented/multi-segment streaming
+   * (e.g. native HLS m3u8, genuinely segmented DASH with per-segment URLs) where
+   * --http-chunk-size causes "Conflicting range" / HTTP 416 errors.
+   *
+   * YouTube's normal progressive and DASH itags (e.g. format 232, 137, 298, 140, 251)
+   * are single-URL streams with range support hosted on Google Video servers. They
+   * MUST keep --http-chunk-size 10M to prevent CDN throttling and 0% stalls.
    */
   private isHlsOrFragmented(url: string, formatArg: string): boolean {
-    // 1. Check formatArg / formatId heuristics (e.g. V_HLSV3_MOBILE-..., hls-..., m3u8, dash)
-    if (/hls|m3u8|dash|frag/i.test(formatArg)) {
+    const isYouTube = /(?:youtube\.com|youtu\.be)/i.test(url);
+
+    // On YouTube, normal progressive and DASH itags (numeric format IDs like 232, 137, 18, 22,
+    // or combinations like 232+bestaudio/best/232, best, worst) are single-URL streams.
+    // They support byte ranges and NEED --http-chunk-size 10M to prevent CDN throttling.
+    if (isYouTube) {
+      // Only treat as fragmented if formatArg explicitly specifies true HLS/m3u8 manifests
+      // (e.g. live HLS streams). Normal YouTube itags (232, 137, 298, 140, etc.) are NOT fragmented.
+      const isExplicitHls = /(?:^|[^a-zA-Z0-9])(?:hls|m3u8)(?:[^a-zA-Z0-9]|$)/i.test(formatArg);
+      return isExplicitHls;
+    }
+
+    // 1. Check formatArg / formatId heuristics for non-YouTube platforms
+    // (e.g. Pinterest's V_HLSV3_MOBILE-..., hls-..., m3u8)
+    if (/hls|m3u8|frag/i.test(formatArg)) {
       return true;
     }
 
-    // 2. Check cached metadata for this URL
+    // 2. Known HLS/fragmented-centric platforms (Pinterest, TikTok, Instagram, Reddit)
+    if (/pin\.it|pinterest\.com|tiktok\.com|instagram\.com|reddit\.com|v\.redd\.it/i.test(url)) {
+      return true;
+    }
+
+    // 3. Check cached metadata for this URL on other platforms
     const cached = this.infoCache.get(url);
     if (cached?.data?.formats) {
+      // Extract specific format IDs from formatArg (e.g. "V_HLSV3_MOBILE-1008+bestaudio/best/V_HLSV3_MOBILE-1008")
+      const requestedTokens = new Set(
+        formatArg.split(/[/+]/).map((t) => t.trim()).filter(Boolean)
+      );
+
       const matching = cached.data.formats.filter((f) => {
-        if (f.formatId && formatArg.includes(f.formatId)) return true;
-        return false;
+        if (!f.formatId) return false;
+        return requestedTokens.has(f.formatId);
       });
 
-      const formatsToCheck = matching.length > 0 ? matching : cached.data.formats;
-      for (const f of formatsToCheck) {
+      // If specific formats matched, check those for true fragmented protocols
+      for (const f of matching) {
         if (
           f.protocol &&
           (f.protocol.includes('m3u8') ||
-            f.protocol.includes('dash') ||
-            f.protocol.includes('frag') ||
             f.protocol === 'm3u8_native' ||
-            f.protocol === 'http_dash_segments')
+            f.protocol === 'http_dash_segments' ||
+            f.protocol.includes('frag'))
         ) {
           return true;
         }
-        if (f.formatId && /hls|m3u8|dash/i.test(f.formatId)) {
+        if (f.formatId && /hls|m3u8/i.test(f.formatId)) {
           return true;
         }
       }
-    }
 
-    // 3. Known HLS-centric platforms when format is generic (best, worst)
-    if (/pin\.it|pinterest\.com|tiktok\.com|instagram\.com/i.test(url)) {
-      return true;
+      // If no specific formats matched (e.g. generic "best" or "worst"), check if all formats are HLS
+      if (matching.length === 0 && cached.data.formats.length > 0) {
+        const allHls = cached.data.formats.every(
+          (f) =>
+            (f.protocol && (f.protocol.includes('m3u8') || f.protocol === 'm3u8_native')) ||
+            (f.formatId && /hls|m3u8/i.test(f.formatId))
+        );
+        if (allHls) {
+          return true;
+        }
+      }
     }
 
     return false;
@@ -646,6 +678,11 @@ export class DownloadManager {
       finalOutputPath = path.join(defaultDir, sanitizedName);
     }
 
+    // The container is decided by the kind of download, not by the source stream:
+    // video always ends up as .mp4 and audio-only as .mp3 (see launchDownload).
+    const audioOnly = this.isAudioOnlyFormat(url, formatId);
+    finalOutputPath = finalOutputPath.replace(/\.[a-z0-9]{2,4}$/i, '') + (audioOnly ? '.mp3' : '.mp4');
+
     const parentDir = path.dirname(finalOutputPath);
     if (!fs.existsSync(parentDir)) {
       fs.mkdirSync(parentDir, { recursive: true });
@@ -656,15 +693,19 @@ export class DownloadManager {
     // which is the root cause of "Conflicting range" errors on Pinterest.
     this.cleanPartialFiles(finalOutputPath);
 
-    // Format selection argument
+    // Format selection argument. When merging, prefer AAC (m4a) audio so the
+    // resulting .mp4 plays everywhere; fall back to any audio track.
     let formatArg = formatId;
-    if (formatId === 'lowest') {
+    if (audioOnly) {
+      // Audio is re-encoded to MP3 anyway, so take the best track in any codec
+      formatArg = 'bestaudio/best';
+    } else if (formatId === 'lowest') {
       formatArg = 'worstvideo+worstaudio/worst';
     } else if (formatId === 'best') {
-      formatArg = 'bestvideo+bestaudio/best';
+      formatArg = 'bestvideo+bestaudio[ext=m4a]/bestvideo+bestaudio/best';
     } else {
       // Append bestaudio if the format is video-only so it gets merged with audio
-      formatArg = `${formatId}+bestaudio/best/${formatId}`;
+      formatArg = `${formatId}+bestaudio[ext=m4a]/${formatId}+bestaudio/best/${formatId}`;
     }
 
     // Start with aggressive multi-connection settings (optimised for YouTube)
@@ -673,8 +714,45 @@ export class DownloadManager {
       url,
       formatArg,
       finalOutputPath,
+      audioOnly,
       useAggressiveSettings: true,
     });
+  }
+
+  /**
+   * Work out which streams a raw yt-dlp format carries. yt-dlp uses 'none' for
+   * "definitely absent" and leaves vcodec/acodec unset when it simply doesn't know,
+   * which is the norm for direct file links (generic extractor + --no-check-formats).
+   * Unknown streams are inferred from the extension, and a format we still can't
+   * place is treated as an ordinary progressive video file (video + audio).
+   */
+  private classifyStreams(f: any): { hasVideo: boolean; hasAudio: boolean } {
+    const known = (codec: unknown) => typeof codec === 'string' && codec !== '';
+    const videoKnown = known(f.vcodec);
+    const audioKnown = known(f.acodec);
+    if (videoKnown && audioKnown) {
+      return { hasVideo: f.vcodec !== 'none', hasAudio: f.acodec !== 'none' };
+    }
+
+    const ext = String(f.ext || '').toLowerCase();
+    const isAudioFile =
+      (f.audio_ext && f.audio_ext !== 'none' && (!f.video_ext || f.video_ext === 'none')) ||
+      /^(mp3|m4a|aac|opus|ogg|oga|wav|flac|wma|weba)$/.test(ext);
+    const hasDimensions = Boolean(f.width || f.height);
+
+    const hasVideo = videoKnown ? f.vcodec !== 'none' : hasDimensions || !isAudioFile;
+    const hasAudio = audioKnown ? f.acodec !== 'none' : true;
+    return { hasVideo, hasAudio };
+  }
+
+  /**
+   * True when the requested format is audio-only: either an explicit
+   * "bestaudio" selector, or a format ID the cached metadata marks as audio.
+   */
+  private isAudioOnlyFormat(url: string, formatId: string): boolean {
+    if (/^(ba|bestaudio)\b/i.test(formatId)) return true;
+    const fmt = this.infoCache.get(url)?.data.formats.find((f) => f.formatId === formatId);
+    return Boolean(fmt && fmt.hasAudio && !fmt.hasVideo);
   }
 
   /**
@@ -688,11 +766,18 @@ export class DownloadManager {
       url: string;
       formatArg: string;
       finalOutputPath: string;
+      audioOnly: boolean;
       useAggressiveSettings: boolean;
       isRetry?: boolean;
+      /** Re-encode to mp4 instead of remuxing (codecs MP4 cannot hold, e.g. VP8/Vorbis) */
+      recode?: boolean;
     }
   ): Promise<StartDownloadResult> {
-    const { downloadId, url, formatArg, finalOutputPath, useAggressiveSettings, isRetry } = opts;
+    const { downloadId, url, formatArg, finalOutputPath, audioOnly, useAggressiveSettings, isRetry, recode } = opts;
+
+    // Let yt-dlp name intermediate files by their real extension (%(ext)s); the
+    // merge / remux / extract steps below then produce exactly finalOutputPath.
+    const outputTemplate = finalOutputPath.replace(/\.[^.\\/]+$/, '').replace(/%/g, '%%') + '.%(ext)s';
 
     const args = [
       '-4', // Force IPv4: avoids fragment socket stalling
@@ -701,13 +786,23 @@ export class DownloadManager {
       formatArg,
       '--no-mtime', // Skip file modification time write to finish immediately
       '-o',
-      finalOutputPath,
+      outputTemplate,
       '--no-warnings',
       '--no-playlist',
     ];
 
-    if (finalOutputPath.toLowerCase().endsWith('.mp4')) {
-      args.push('--merge-output-format', 'mp4');
+    if (audioOnly) {
+      // Extract and convert to MP3 with the bundled ffmpeg. This is a real re-encode
+      // (AAC/Opus -> MP3), so it takes a few seconds after the download reaches 100%.
+      args.push('-x', '--audio-format', 'mp3', '--audio-quality', `${MP3_BITRATE_KBPS}K`);
+    } else if (recode) {
+      // Fallback: merge into mkv (accepts any codec), then re-encode to H.264/AAC mp4
+      args.push('--merge-output-format', 'mkv', '--recode-video', 'mp4');
+    } else {
+      // --merge-output-format only applies when separate streams are merged;
+      // --remux-video also covers single-stream downloads (e.g. VP9/WebM) with a
+      // lossless container swap, so video always ends up as .mp4.
+      args.push('--merge-output-format', 'mp4', '--remux-video', 'mp4');
     }
 
     const isHls = this.isHlsOrFragmented(url, formatArg);
@@ -757,7 +852,7 @@ export class DownloadManager {
         : 'aggressive-progressive (N=8, 10M chunks)'
       : 'conservative (N=1, no chunks)';
     logger.info(
-      `[startDownload] Launching download [${settingsLabel}]${isRetry ? ' (RETRY)' : ''} with args: ${args.join(' ')}`
+      `[startDownload] Launching download [${settingsLabel}]${isRetry ? ' (RETRY)' : ''}${recode ? ' (RECODE)' : ''} with args: ${args.join(' ')}`
     );
 
     const emitter = yt.exec(args);
@@ -800,6 +895,22 @@ export class DownloadManager {
       this.activeDownloads.delete(downloadId);
       // Clean up any lingering fragment files or temp files while keeping final completed file
       this.cleanPartialFiles(finalOutputPath);
+
+      // yt-dlp can exit cleanly without producing the expected file (e.g. it skipped
+      // an existing broken output). Only report success for a real, non-empty file.
+      const produced = fs.existsSync(finalOutputPath) && fs.statSync(finalOutputPath).size > 0;
+      if (!produced) {
+        logger.error(`[startDownload] yt-dlp finished but "${finalOutputPath}" is missing or empty`);
+        this.progressCallback?.({
+          downloadId,
+          percent: 0,
+          status: 'error',
+          error: `Download finished but the ${audioOnly ? 'mp3' : 'mp4'} file was not created`,
+          outputPath: finalOutputPath,
+        });
+        return;
+      }
+
       this.progressCallback?.({
         downloadId,
         percent: 100,
@@ -833,6 +944,7 @@ export class DownloadManager {
           url,
           formatArg,
           finalOutputPath,
+          audioOnly,
           useAggressiveSettings: false,
           isRetry: true,
         }).catch((retryErr) => {
@@ -847,6 +959,30 @@ export class DownloadManager {
           });
         });
         return; // Don't emit error — the retry will handle it
+      }
+
+      // ── Fall back to re-encoding when the mp4 remux/merge fails ─
+      // Container swaps only work for MP4-compatible codecs (H.264/VP9/AV1, AAC/Opus).
+      // Legacy streams such as VP8/Vorbis WebM need a real re-encode. The finished
+      // download stays on disk, so yt-dlp skips re-downloading and only post-processes.
+      if (!audioOnly && !recode && /Postprocessing|Conversion failed|Error opening output/i.test(errMsg)) {
+        logger.warn(`[startDownload] mp4 remux/merge failed, retrying with --recode-video mp4. Error: ${err?.message || 'unknown'}`);
+        this.activeDownloads.delete(downloadId);
+        // The failed remux leaves a broken (often 0-byte) .mp4 behind; yt-dlp would treat
+        // it as "already downloaded" and skip the re-encode, so remove it first.
+        this.unlinkWithRetry(finalOutputPath);
+        this.launchDownload(yt, { ...opts, recode: true }).catch((recodeErr) => {
+          logger.error(`[startDownload] Re-encode fallback failed:`, recodeErr);
+          this.cleanPartialFiles(finalOutputPath);
+          this.progressCallback?.({
+            downloadId,
+            percent: 0,
+            status: 'error',
+            error: recodeErr?.message || 'Could not convert the download to mp4',
+            outputPath: finalOutputPath,
+          });
+        });
+        return; // The re-encode attempt reports completion or failure
       }
 
       // On any download error, clean up all partial, fragment, and empty files

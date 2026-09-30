@@ -17,6 +17,7 @@ import {
   openLogFileInExplorer,
 } from './logger';
 import { appUpdater } from './updater';
+import { statsClient } from './stats-client';
 
 // Initialize file & crash logger immediately
 setupErrorLogging();
@@ -145,6 +146,10 @@ function setupIpcHandlers(): void {
     return openLogFileInExplorer();
   });
 
+  ipcMain.handle(IPC_CHANNELS.STATS_GET, async () => {
+    return statsClient.getStats();
+  });
+
   ipcMain.handle(IPC_CHANNELS.LOGS_GET_PATH, async () => {
     return getLogFilePath();
   });
@@ -184,6 +189,18 @@ function setupIpcHandlers(): void {
   ipcMain.handle(IPC_CHANNELS.SHELL_OPEN_PATH, async (_event, targetPath: string) => {
     if (targetPath) {
       shell.showItemInFolder(targetPath);
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.SHELL_OPEN_EXTERNAL, async (_event, url: string) => {
+    // Only hand web links to the OS; never file:// or custom protocols
+    try {
+      const { protocol } = new URL(url);
+      if (protocol === 'https:' || protocol === 'http:') {
+        await shell.openExternal(url);
+      }
+    } catch {
+      // Ignore malformed URLs
     }
   });
 
@@ -237,6 +254,7 @@ function createWindow(): void {
 app.whenReady().then(async () => {
   setupIpcHandlers();
   createWindow();
+  statsClient.start();
 
   try {
     await downloadManager.initialize();

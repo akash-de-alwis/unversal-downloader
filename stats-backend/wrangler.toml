@@ -1,0 +1,27 @@
+name = "universal-downloader-stats"
+main = "src/index.ts"
+compatibility_date = "2026-09-30"
+
+# Anonymous usage stats (device last-seen times + download counter).
+# Create the namespace once with:
+#   npx wrangler kv namespace create STATS
+# then paste the id it prints below. After changing bindings, run `npm run cf-typegen`.
+[[kv_namespaces]]
+binding = "STATS"
+id = "f30b67ae4701420faa98baf19e0d9860"
+
+# Workers Logs and Traces, viewable in the Cloudflare dashboard.
+# The Worker's own error logs are kept; 1 in 10 requests is traced.
+# Per-request invocation logs are off: they record request metadata (headers,
+# location), and the app promises users that no personal data is kept.
+[observability]
+enabled = true
+
+[observability.logs]
+enabled = true
+head_sampling_rate = 1
+invocation_logs = false
+
+[observability.traces]
+enabled = true
+head_sampling_rate = 0.1

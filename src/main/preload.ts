@@ -30,6 +30,7 @@ const api: IpcApi = {
     ipcRenderer.invoke(IPC_CHANNELS.STORE_SET_DOWNLOAD_FOLDER, folderPath),
   readClipboard: () => ipcRenderer.invoke(IPC_CHANNELS.CLIPBOARD_READ),
   openPath: (targetPath: string) => ipcRenderer.invoke(IPC_CHANNELS.SHELL_OPEN_PATH, targetPath),
+  openExternal: (url: string) => ipcRenderer.invoke(IPC_CHANNELS.SHELL_OPEN_EXTERNAL, url),
 
   // Queue APIs
   getQueue: () => ipcRenderer.invoke(IPC_CHANNELS.QUEUE_GET_ITEMS),
@@ -70,6 +71,7 @@ const api: IpcApi = {
   setOnboardingCompleted: () => ipcRenderer.invoke(IPC_CHANNELS.STORE_SET_ONBOARDING),
   openLogFile: () => ipcRenderer.invoke(IPC_CHANNELS.LOGS_OPEN),
   getLogPath: () => ipcRenderer.invoke(IPC_CHANNELS.LOGS_GET_PATH),
+  getStats: () => ipcRenderer.invoke(IPC_CHANNELS.STATS_GET),
 };
 
 contextBridge.exposeInMainWorld('api', api);
