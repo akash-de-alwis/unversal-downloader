@@ -1,6 +1,6 @@
 {
   "name": "universal-downloader",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Cross-platform universal desktop downloader application",
   "main": "dist/main/index.js",
   "author": "Universal Downloader Team",
@@ -40,8 +40,8 @@
     ],
     "publish": {
       "provider": "github",
-      "owner": "universal-downloader",
-      "repo": "universal-downloader"
+      "owner": "akash-de-alwis",
+      "repo": "unversal-downloader"
     },
     "win": {
       "icon": "assets/icon.ico",
