@@ -2,6 +2,7 @@ export const IPC_CHANNELS = {
   PING: 'app:ping',
   GET_APP_INFO: 'app:get-info',
   DOWNLOAD_FETCH_INFO: 'download:fetch-info',
+  DOWNLOAD_SEARCH: 'download:search',
   DOWNLOAD_START: 'download:start',
   DOWNLOAD_CANCEL: 'download:cancel',
   DOWNLOAD_PROGRESS: 'download:progress',
@@ -48,6 +49,9 @@ export const APP_METADATA = {
   VERSION: '1.0.0',
   DESCRIPTION: 'Cross-platform universal desktop downloader',
 } as const;
+
+/** How many YouTube results a search by name returns */
+export const SEARCH_RESULT_COUNT = 8;
 
 /** Bitrate for audio-only downloads, which are converted to MP3 */
 export const MP3_BITRATE_KBPS = 192;

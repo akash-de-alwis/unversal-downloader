@@ -149,16 +149,20 @@ button {
 }
 
 /* ─── Top bar ─── */
+/* The nav sits outside .main-scroll, so page content scrolls beneath it and never
+   over it. Solid background and a z-index above everything except modals, so
+   scrolled content can't show through or paint on top. */
 .topbar {
-  position: relative;
-  z-index: 2;
+  position: sticky;
+  top: 0;
+  z-index: 100;
   flex-shrink: 0;
   height: 68px;
   padding: 0 40px;
   display: grid;
   grid-template-columns: 1fr auto 1fr;
   align-items: center;
-  background: transparent;
+  background: var(--canvas-top);
   -webkit-app-region: drag;
 }
 
@@ -277,17 +281,55 @@ button {
   max-width: none;
 }
 
+/* Fills exactly the space below the nav. Hero, save line and stats keep their size;
+   when the card holds search results, the results list gives up height and scrolls
+   inside itself, so the page doesn't scroll and the hero stays in place. */
 .download-screen {
+  height: 100%;
   display: flex;
   flex-direction: column;
   align-items: center;
-  padding-top: clamp(40px, 9vh, 96px);
-  padding-bottom: 64px;
+  padding-top: clamp(32px, 9vh, 96px);
+  padding-bottom: 28px;
   animation: fadeIn 0.3s ease;
 }
 
+.download-screen > * {
+  flex-shrink: 0;
+}
+
+.download-screen > .input-card {
+  flex-shrink: 1;
+}
+
+/* Short windows (down to the 620px minimum): tighten the spacing so the
+   results card still fits without the page scrolling */
+@media (max-height: 700px) {
+  .download-screen {
+    padding-bottom: 16px;
+  }
+
+  .download-screen > .input-card {
+    margin-top: 28px;
+  }
+}
+
+.input-card > * {
+  flex-shrink: 0;
+}
+
+.input-card > .search-results {
+  flex-shrink: 1;
+}
+
+/* Smallest card that still shows the results usefully: padding and border (36),
+   input row (26), gaps (2 x 16), results area minimum (172) and the Fetch row (36) */
+.input-card:has(> .search-results) {
+  min-height: 302px;
+}
+
 .hero-title {
-  font-size: clamp(40px, 5.6vw, 64px);
+  font-size: min(clamp(40px, 5.6vw, 64px), 8vh);
   line-height: 1.05;
   font-weight: 600;
   letter-spacing: -0.04em;
@@ -384,6 +426,39 @@ button {
   cursor: not-allowed;
 }
 
+/* Clears the input and resets the card; shown only while the input has text */
+.input-card-clear {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  margin-right: -6px;
+  padding: 0;
+  border-radius: 50%;
+  border: 1px solid var(--frost-pill-border);
+  background: var(--frost-pill-bg);
+  color: #4a4f5e;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.input-card-clear:hover:not(:disabled) {
+  background: #ffffff;
+  color: var(--frost-text);
+}
+
+.input-card-clear:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.input-card-clear:focus-visible {
+  outline: 2px solid var(--aurora-blue);
+  outline-offset: 2px;
+}
+
 /* Preview (after Fetch) — lives inside the card */
 .input-card-preview {
   display: flex;
@@ -467,6 +542,181 @@ button {
 
 .input-card-sub a:hover {
   color: var(--frost-text);
+}
+
+.input-card-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 0;
+  background: none;
+  border: none;
+  font-size: 12px;
+  color: var(--frost-text);
+  cursor: pointer;
+}
+
+.input-card-back:hover {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+/* ─── Search by name: results inside the input card ─── */
+.search-results {
+  flex: 1 1 auto;
+  /* Divider and padding (15) + label (15) + gap (10) + list minimum (132) */
+  min-height: 172px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-top: 14px;
+  border-top: 1px solid rgba(10, 12, 30, 0.08);
+  margin-right: 8px;
+  animation: fadeIn 0.25s ease;
+}
+
+.search-results-head {
+  flex-shrink: 0;
+  font-size: 12px;
+  color: var(--frost-text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.search-results-list {
+  flex: 0 1 auto;
+  min-height: 132px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 312px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  /* Reaching the end of the list must not hand the scroll on to the page */
+  overscroll-behavior: contain;
+  padding-right: 6px;
+  margin-right: -6px;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(10, 12, 30, 0.22) transparent;
+}
+
+/* Same dark glass as Queue/History rows, a touch more opaque so the rows stay
+   dark on the light card */
+.glass-row.search-row {
+  flex-shrink: 0;
+  width: 100%;
+  padding: 10px 12px;
+  background: linear-gradient(rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0.05)), rgba(10, 12, 26, 0.84);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.glass-row.search-row:hover {
+  background: linear-gradient(rgba(255, 255, 255, 0.11), rgba(255, 255, 255, 0.11)), rgba(10, 12, 26, 0.84);
+  border-color: rgba(255, 255, 255, 0.18);
+}
+
+.glass-row.search-row:focus-visible {
+  outline: 2px solid var(--aurora-blue);
+  outline-offset: 2px;
+}
+
+.search-row-skeleton {
+  cursor: default;
+}
+
+.search-row .row-main {
+  width: 100%;
+  min-width: 0;
+  gap: 12px;
+}
+
+.search-row .row-meta {
+  gap: 5px;
+}
+
+.search-row-title {
+  font-size: 13.5px;
+}
+
+.search-thumb {
+  position: relative;
+  flex-shrink: 0;
+  width: 96px;
+  aspect-ratio: 16 / 9;
+  border-radius: 8px;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.06);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+}
+
+.search-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.search-thumb-badge {
+  position: absolute;
+  right: 4px;
+  bottom: 4px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.78);
+  color: #ffffff;
+  font-size: 10.5px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+
+.search-thumb-badge.live {
+  background: #dc2626;
+  letter-spacing: 0.04em;
+}
+
+.shimmer-dark {
+  background: linear-gradient(90deg, rgba(255, 255, 255, 0.05) 25%, rgba(255, 255, 255, 0.12) 50%, rgba(255, 255, 255, 0.05) 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.3s linear infinite;
+}
+
+.search-skeleton-line {
+  height: 11px;
+  width: 85%;
+  border-radius: 6px;
+}
+
+.search-skeleton-line.short {
+  width: 40%;
+}
+
+.search-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 22px 12px 6px;
+  border-top: 1px solid rgba(10, 12, 30, 0.08);
+  margin-right: 8px;
+  text-align: center;
+  color: var(--frost-text-muted);
+  animation: fadeIn 0.25s ease;
+}
+
+.search-empty-title {
+  margin-top: 4px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--frost-text);
+}
+
+.search-empty-hint {
+  font-size: 12.5px;
 }
 
 /* Loading shimmer */

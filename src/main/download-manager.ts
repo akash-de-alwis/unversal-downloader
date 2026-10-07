@@ -4,13 +4,14 @@ import fs from 'node:fs';
 import YTDlpWrap from 'yt-dlp-wrap';
 import ffmpegPath from 'ffmpeg-static';
 import { logger } from './logger';
-import { MP3_BITRATE_KBPS } from '../shared/constants';
+import { MP3_BITRATE_KBPS, SEARCH_RESULT_COUNT } from '../shared/constants';
 import type {
   VideoMetadata,
   VideoFormat,
   DownloadProgress,
   StartDownloadResult,
   CancelDownloadResult,
+  SearchResult,
 } from '../shared/types';
 
 interface ActiveDownload {
@@ -232,6 +233,79 @@ export class DownloadManager {
       throw new Error('DownloadManager failed to initialize yt-dlp binary.');
     }
     return this.ytDlp;
+  }
+
+  /**
+   * Search YouTube by name ("ytsearch8:<term>"). --flat-playlist lists the results
+   * without extracting each video, so this takes a few seconds rather than a few per
+   * result. Picking a result goes through fetchInfo like any pasted link.
+   */
+  public async searchVideos(term: string, timeoutMs: number = 30000): Promise<SearchResult[]> {
+    const query = term.trim().replace(/\s+/g, ' ');
+    if (!query) return [];
+
+    const yt = await this.ensureInitialized();
+    const args = ['-4', '--flat-playlist', '--dump-single-json', '--no-warnings'];
+    if (this.denoBinaryPath) {
+      args.push('--js-runtimes', `deno:${this.denoBinaryPath}`);
+    }
+    // The "ytsearchN:" prefix means the term can never be read as a command-line option
+    args.push(`ytsearch${SEARCH_RESULT_COUNT}:${query}`);
+
+    const startTime = Date.now();
+    logger.info(`[search] Searching YouTube for "${query}"`);
+
+    const abortController = new AbortController();
+    let timeoutTimer: NodeJS.Timeout | null = null;
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      timeoutTimer = setTimeout(() => {
+        abortController.abort();
+        reject(new Error(`Search timed out after ${Math.round(timeoutMs / 1000)} seconds.`));
+      }, timeoutMs);
+    });
+
+    try {
+      const stdout = await Promise.race([
+        yt.execPromise(args, {}, abortController.signal),
+        timeoutPromise,
+      ]);
+      const raw = JSON.parse(stdout);
+      const entries: any[] = Array.isArray(raw.entries) ? raw.entries : [];
+
+      const results: SearchResult[] = [];
+      for (const e of entries) {
+        if (!e?.id) continue;
+        const url: string = e.url || e.webpage_url || `https://www.youtube.com/watch?v=${e.id}`;
+        // Only real videos; search pages can also list channels or playlists
+        if (!/youtube\.com\/watch\?v=|youtu\.be\//i.test(url)) continue;
+
+        const duration = typeof e.duration === 'number' ? e.duration : 0;
+        const thumbs: any[] = Array.isArray(e.thumbnails) ? e.thumbnails : [];
+        const thumbnail =
+          thumbs.find((t) => (t?.width ?? 0) >= 320)?.url ||
+          thumbs[thumbs.length - 1]?.url ||
+          `https://i.ytimg.com/vi/${e.id}/mqdefault.jpg`;
+
+        results.push({
+          id: e.id,
+          url,
+          title: e.title || 'Untitled video',
+          channel: e.channel || e.uploader || '',
+          thumbnail,
+          duration,
+          durationFormatted: duration > 0 ? this.formatSeconds(duration) : '',
+          isLive: e.live_status === 'is_live',
+        });
+      }
+
+      logger.info(`[search] ${results.length} results in ${Date.now() - startTime}ms`);
+      return results;
+    } catch (err: any) {
+      logger.error(`[search] Failed after ${Date.now() - startTime}ms: ${err?.message || err}`);
+      throw err;
+    } finally {
+      if (timeoutTimer) clearTimeout(timeoutTimer);
+    }
   }
 
   public async fetchInfo(url: string, timeoutMs: number = 30000): Promise<VideoMetadata> {

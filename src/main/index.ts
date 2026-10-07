@@ -49,6 +49,10 @@ function setupIpcHandlers(): void {
     return await downloadManager.fetchInfo(url);
   });
 
+  ipcMain.handle(IPC_CHANNELS.DOWNLOAD_SEARCH, async (_event, term: string) => {
+    return await downloadManager.searchVideos(String(term ?? ''));
+  });
+
   ipcMain.handle(
     IPC_CHANNELS.DOWNLOAD_START,
     async (_event, url: string, formatId: string, outputPath?: string) => {

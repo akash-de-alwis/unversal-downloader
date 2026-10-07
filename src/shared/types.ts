@@ -38,6 +38,19 @@ export interface VideoMetadata {
   webpageUrl: string;
 }
 
+/** One YouTube search result; picking it fetches `url` like a pasted link */
+export interface SearchResult {
+  id: string;
+  url: string;
+  title: string;
+  channel: string;
+  thumbnail: string;
+  /** Seconds; 0 when unknown (e.g. live streams) */
+  duration: number;
+  durationFormatted: string;
+  isLive: boolean;
+}
+
 export interface FriendlyFormatOption {
   id: string;
   label: string;
@@ -164,6 +177,7 @@ export interface IpcApi {
   ping: () => Promise<PingResponse>;
   getAppInfo: () => Promise<AppInfoResponse>;
   fetchInfo: (url: string) => Promise<VideoMetadata>;
+  searchVideos: (term: string) => Promise<SearchResult[]>;
   startDownload: (
     url: string,
     formatId: string,

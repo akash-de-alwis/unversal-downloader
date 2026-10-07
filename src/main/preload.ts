@@ -13,6 +13,7 @@ const api: IpcApi = {
   ping: () => ipcRenderer.invoke(IPC_CHANNELS.PING),
   getAppInfo: () => ipcRenderer.invoke(IPC_CHANNELS.GET_APP_INFO),
   fetchInfo: (url: string) => ipcRenderer.invoke(IPC_CHANNELS.DOWNLOAD_FETCH_INFO, url),
+  searchVideos: (term: string) => ipcRenderer.invoke(IPC_CHANNELS.DOWNLOAD_SEARCH, term),
   startDownload: (url: string, formatId: string, outputPath?: string) =>
     ipcRenderer.invoke(IPC_CHANNELS.DOWNLOAD_START, url, formatId, outputPath),
   cancelDownload: (downloadId: string) =>

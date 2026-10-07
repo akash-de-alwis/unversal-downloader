@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   Activity,
   CheckCircle2,
@@ -8,6 +8,7 @@ import {
   RotateCcw,
   Video as VideoIcon,
   XCircle,
+  X as XIcon,
   ExternalLink,
   Pause,
   Play,
@@ -15,6 +16,8 @@ import {
   HelpCircle,
   Copy,
   RefreshCw,
+  Search as SearchIcon,
+  ChevronLeft,
 } from 'lucide-react';
 import type {
   AppInfoResponse,
@@ -26,6 +29,7 @@ import type {
   AppSettings,
   UpdateStatus,
   PublicStats,
+  SearchResult,
 } from '../shared/types';
 import { MP3_BITRATE_KBPS } from '../shared/constants';
 import { OnboardingModal } from './components/OnboardingModal';
@@ -54,7 +58,12 @@ const TikTokIcon: React.FC = () => (
 );
 
 export type ActiveTab = 'downloader' | 'queue' | 'history' | 'settings';
-export type FetchState = 'idle' | 'loading' | 'preview' | 'error';
+export type FetchState = 'idle' | 'loading' | 'searching' | 'results' | 'preview' | 'error';
+
+/** Links go straight to the single-video fetch; anything else is a YouTube search */
+function looksLikeUrl(input: string): boolean {
+  return /^(https?:\/\/|www\.)/i.test(input.trim());
+}
 
 function groupFormatsIntoFriendlyOptions(
   formats: VideoFormat[],
@@ -172,6 +181,12 @@ export const App: React.FC = () => {
   const [url, setUrl] = useState('');
   const [fetchState, setFetchState] = useState<FetchState>('idle');
   const [videoInfo, setVideoInfo] = useState<VideoMetadata | null>(null);
+  // Search by name: the last term and its results (kept so the preview can go back to them)
+  const [searchTerm, setSearchTerm] = useState('');
+  const [searchResults, setSearchResults] = useState<SearchResult[] | null>(null);
+  const urlInputRef = useRef<HTMLInputElement>(null);
+  // The input value the card's current preview / results / error belongs to
+  const shownForInputRef = useRef('');
   const [friendlyOptions, setFriendlyOptions] = useState<FriendlyFormatOption[]>([]);
   const [selectedOptionId, setSelectedOptionId] = useState<string>('best');
 
@@ -367,9 +382,91 @@ export const App: React.FC = () => {
     }
   };
 
-  const handleFetch = async (targetUrl?: string) => {
+  const handleSearch = async (term: string) => {
+    shownForInputRef.current = term;
+    setFetchState('searching');
+    setErrorMessage('');
+    setRawErrorDetails('');
+    setVideoInfo(null);
+    setSearchTerm(term);
+    setSearchResults(null);
+
+    if (!window.api?.searchVideos) {
+      setSearchResults([]);
+      setFetchState('results');
+      return;
+    }
+
+    try {
+      setSearchResults(await window.api.searchVideos(term));
+      setFetchState('results');
+    } catch (err: any) {
+      console.error('Search error:', err);
+      const raw = err?.message || String(err);
+      let friendly = "Couldn't search YouTube right now. Try again, or paste a video link instead.";
+      if (raw.includes('ENOTFOUND') || raw.includes('getaddrinfo') || raw.includes('network')) {
+        friendly = 'Network connection failed. Please check your connection.';
+      } else if (raw.includes('timed out')) {
+        friendly = 'The search took too long. Check your connection and try again.';
+      }
+      setErrorMessage(friendly);
+      setRawErrorDetails(raw);
+      setFetchState('error');
+    }
+  };
+
+  // A picked result goes through the normal link flow: same fetch, preview and Download
+  const handleSelectSearchResult = (result: SearchResult) => {
+    setUrl(result.url);
+    handleFetch(result.url, { fromSearch: true });
+  };
+
+  // Drop any preview, results or error so the card is ready for a new search or link
+  const resetCard = () => {
+    setFetchState('idle');
+    setVideoInfo(null);
+    setSearchResults(null);
+    setSearchTerm('');
+    setErrorMessage('');
+    setRawErrorDetails('');
+    setShowErrorDetails(false);
+    shownForInputRef.current = '';
+  };
+
+  // The input's X: empty the box and reset the card
+  const handleClearInput = () => {
+    setUrl('');
+    resetCard();
+    urlInputRef.current?.focus();
+  };
+
+  // Typing a genuinely different value over a preview, results or error starts over
+  const handleInputChange = (value: string) => {
+    setUrl(value);
+    const showingSomething =
+      fetchState === 'preview' || fetchState === 'results' || fetchState === 'error';
+    if (showingSomething && value.trim() !== shownForInputRef.current) {
+      resetCard();
+    }
+  };
+
+  const handleBackToResults = () => {
+    shownForInputRef.current = searchTerm;
+    setUrl(searchTerm);
+    setVideoInfo(null);
+    setFetchState('results');
+  };
+
+  const handleFetch = async (targetUrl?: string, { fromSearch = false } = {}) => {
     const urlToFetch = (targetUrl ?? url).trim();
     if (!urlToFetch) return;
+
+    if (!looksLikeUrl(urlToFetch)) {
+      await handleSearch(urlToFetch);
+      return;
+    }
+    if (!fromSearch) setSearchResults(null);
+    shownForInputRef.current = urlToFetch;
 
     try {
       setFetchState('loading');
@@ -624,12 +721,16 @@ export const App: React.FC = () => {
     (i) => i.status === 'downloading' || i.status === 'queued'
   ).length;
 
+  const isFetchBusy = fetchState === 'loading' || fetchState === 'searching';
+
   const engineStatus =
     fetchState === 'loading'
       ? 'Checking link…'
-      : activeDownloadsCount > 0
-        ? `${activeDownloadsCount} downloading`
-        : 'Ready to download';
+      : fetchState === 'searching'
+        ? 'Searching…'
+        : activeDownloadsCount > 0
+          ? `${activeDownloadsCount} downloading`
+          : 'Ready to download';
 
   const navItems: { id: ActiveTab; label: string }[] = [
     { id: 'downloader', label: 'Download' },
@@ -676,7 +777,7 @@ export const App: React.FC = () => {
 
         <div className="topbar-status" id="app-system-status">
           <span
-            className={`topbar-status-dot ${fetchState === 'loading' || activeDownloadsCount > 0 ? 'busy' : ''}`}
+            className={`topbar-status-dot ${isFetchBusy || activeDownloadsCount > 0 ? 'busy' : ''}`}
           />
           <span>{engineStatus}</span>
         </div>
@@ -692,29 +793,50 @@ export const App: React.FC = () => {
               Paste a link from YouTube, Pinterest, TikTok and 1,800+ sites.
             </p>
 
-            <div className={`input-card ${isPreview ? 'expanded' : ''}`} id="download-input-card">
+            <div
+              className={`input-card ${isPreview || fetchState === 'results' ? 'expanded' : ''}`}
+              id="download-input-card"
+            >
               {/* URL field */}
               <div className="input-card-url-row">
                 <input
+                  ref={urlInputRef}
                   id="main-url-input"
                   type="text"
                   className="input-card-url"
-                  placeholder="Paste a video link..."
+                  placeholder="Search or paste a video link..."
                   value={url}
-                  onChange={(e) => setUrl(e.target.value)}
+                  onChange={(e) => handleInputChange(e.target.value)}
                   onKeyDown={(e) => {
-                    if (e.key === 'Enter') handleFetch();
+                    // Same as clicking Fetch; ignore Enter that confirms an IME composition
+                    if (e.key === 'Enter' && !e.nativeEvent.isComposing) {
+                      e.preventDefault();
+                      handleFetch();
+                    }
                   }}
-                  disabled={fetchState === 'loading'}
+                  disabled={isFetchBusy}
                   spellCheck={false}
                   autoFocus
                 />
+                {url && (
+                  <button
+                    id="btn-clear-input"
+                    type="button"
+                    className="input-card-clear"
+                    onClick={handleClearInput}
+                    disabled={isFetchBusy}
+                    title="Clear"
+                    aria-label="Clear"
+                  >
+                    <XIcon size={13} />
+                  </button>
+                )}
                 <button
                   id="btn-paste-clipboard"
                   type="button"
                   className="input-card-paste"
                   onClick={handlePaste}
-                  disabled={fetchState === 'loading'}
+                  disabled={isFetchBusy}
                   title="Paste from clipboard"
                 >
                   <Clipboard size={13} />
@@ -732,6 +854,80 @@ export const App: React.FC = () => {
                   </div>
                 </div>
               )}
+
+              {/* Search loading: placeholder result rows */}
+              {fetchState === 'searching' && (
+                <div className="search-results" id="state-search-loading" aria-busy="true">
+                  <div className="search-results-head">Searching YouTube for “{searchTerm}”…</div>
+                  <div className="search-results-list">
+                    {[0, 1, 2].map((i) => (
+                      <div key={i} className="glass-row search-row search-row-skeleton">
+                        <div className="row-main">
+                          <div className="search-thumb shimmer-dark" />
+                          <div className="row-meta">
+                            <div className="shimmer-dark search-skeleton-line" />
+                            <div className="shimmer-dark search-skeleton-line short" />
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Search results: picking one runs the normal link fetch */}
+              {fetchState === 'results' &&
+                searchResults &&
+                (searchResults.length === 0 ? (
+                  <div className="search-empty" id="state-search-empty">
+                    <SearchIcon size={18} />
+                    <p className="search-empty-title">No videos found for “{searchTerm}”</p>
+                    <p className="search-empty-hint">
+                      Try different words, or paste a video link instead.
+                    </p>
+                  </div>
+                ) : (
+                  <div className="search-results" id="state-search-results">
+                    <div className="search-results-head">Top results for “{searchTerm}”</div>
+                    <div className="search-results-list" role="list">
+                      {searchResults.map((r) => (
+                        <button
+                          key={r.id}
+                          id={`search-result-${r.id}`}
+                          type="button"
+                          role="listitem"
+                          className="glass-row search-row"
+                          onClick={() => handleSelectSearchResult(r)}
+                          title={r.title}
+                        >
+                          <div className="row-main">
+                            <div className="search-thumb">
+                              {r.thumbnail ? (
+                                <img src={r.thumbnail} alt="" loading="lazy" />
+                              ) : (
+                                <VideoIcon size={16} />
+                              )}
+                              {r.isLive ? (
+                                <span className="search-thumb-badge live">LIVE</span>
+                              ) : (
+                                r.durationFormatted && (
+                                  <span className="search-thumb-badge">{r.durationFormatted}</span>
+                                )
+                              )}
+                            </div>
+                            <div className="row-meta">
+                              <div className="row-title search-row-title">{r.title}</div>
+                              <div className="row-sub">
+                                {r.channel && <span>{r.channel}</span>}
+                                {r.durationFormatted && <span>{r.durationFormatted}</span>}
+                              </div>
+                            </div>
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                ))}
 
               {/* Error — inline inside the card */}
               {fetchState === 'error' && (
@@ -790,6 +986,16 @@ export const App: React.FC = () => {
                       {videoInfo.title}
                     </h2>
                     <div className="input-card-sub">
+                      {searchResults && searchResults.length > 0 && (
+                        <button
+                          id="btn-back-to-results"
+                          type="button"
+                          className="input-card-back"
+                          onClick={handleBackToResults}
+                        >
+                          <ChevronLeft size={12} /> Results
+                        </button>
+                      )}
                       {videoInfo.uploader && <span>{videoInfo.uploader}</span>}
                       {videoInfo.duration > 0 && <span>{videoInfo.durationFormatted}</span>}
                       <a href={videoInfo.webpageUrl} target="_blank" rel="noreferrer">
@@ -837,12 +1043,12 @@ export const App: React.FC = () => {
                     type="button"
                     className="dark-pill"
                     onClick={() => handleFetch()}
-                    disabled={!url.trim() || fetchState === 'loading'}
+                    disabled={!url.trim() || isFetchBusy}
                   >
-                    {fetchState === 'loading' ? (
+                    {isFetchBusy ? (
                       <>
                         <Activity size={14} className="spin-icon" />
-                        <span>Fetching</span>
+                        <span>{fetchState === 'searching' ? 'Searching' : 'Fetching'}</span>
                       </>
                     ) : (
                       'Fetch'
