@@ -214,6 +214,9 @@ export interface IpcApi {
   getDiagnostics: () => Promise<DiagnosticsReport>;
   checkForUpdates: () => Promise<UpdateStatus>;
   onUpdateStatus: (callback: (status: UpdateStatus) => void) => () => void;
+  getUpdateStatus: () => Promise<UpdateStatus>;
+  /** Stops downloads, installs the downloaded update and relaunches; false if none is ready */
+  installUpdate: () => Promise<boolean>;
   hasCompletedOnboarding: () => Promise<boolean>;
   setOnboardingCompleted: () => Promise<void>;
   openLogFile: () => Promise<boolean>;

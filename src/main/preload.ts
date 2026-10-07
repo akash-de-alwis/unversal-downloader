@@ -61,6 +61,8 @@ const api: IpcApi = {
   // Diagnostics & Auto-Update
   getDiagnostics: () => ipcRenderer.invoke(IPC_CHANNELS.DIAGNOSTICS_GET),
   checkForUpdates: () => ipcRenderer.invoke(IPC_CHANNELS.UPDATER_CHECK),
+  getUpdateStatus: () => ipcRenderer.invoke(IPC_CHANNELS.UPDATER_GET_STATUS),
+  installUpdate: () => ipcRenderer.invoke(IPC_CHANNELS.UPDATER_INSTALL),
   onUpdateStatus: (callback: (status: UpdateStatus) => void) => {
     const handler = (_event: IpcRendererEvent, status: UpdateStatus) => callback(status);
     ipcRenderer.on(IPC_CHANNELS.UPDATER_STATUS, handler);

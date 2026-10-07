@@ -35,6 +35,8 @@ export const IPC_CHANNELS = {
   DIAGNOSTICS_GET: 'diagnostics:get',
   UPDATER_CHECK: 'updater:check',
   UPDATER_STATUS: 'updater:status',
+  UPDATER_GET_STATUS: 'updater:get-status',
+  UPDATER_INSTALL: 'updater:install',
   STORE_GET_ONBOARDING: 'store:get-onboarding',
   STORE_SET_ONBOARDING: 'store:set-onboarding',
   LOGS_OPEN: 'logs:open',

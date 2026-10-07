@@ -1,6 +1,7 @@
 import { app } from 'electron';
 import path from 'node:path';
 import fs from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import YTDlpWrap from 'yt-dlp-wrap';
 import ffmpegPath from 'ffmpeg-static';
 import { logger } from './logger';
@@ -1072,6 +1073,29 @@ export class DownloadManager {
     });
 
     return Promise.resolve({ downloadId, outputPath: finalOutputPath });
+  }
+
+  /**
+   * Stop every running download before the app quits to install an update. Partial
+   * files are kept. On Windows the whole process tree is killed: yt-dlp's own ffmpeg
+   * or deno children would otherwise outlive it and lock files the installer replaces.
+   */
+  public stopAllForUpdate(): void {
+    for (const item of this.activeDownloads.values()) {
+      item.isCancelled = true;
+      const proc = item.emitter.ytDlpProcess;
+      if (!proc || proc.killed || !proc.pid) continue;
+      try {
+        if (process.platform === 'win32') {
+          spawnSync('taskkill', ['/pid', String(proc.pid), '/T', '/F'], { windowsHide: true });
+        } else {
+          proc.kill('SIGTERM');
+        }
+      } catch (e) {
+        logger.warn(`Could not stop download ${item.downloadId} before update:`, e);
+      }
+    }
+    this.activeDownloads.clear();
   }
 
   public async cancelDownload(

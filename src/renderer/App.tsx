@@ -346,7 +346,11 @@ export const App: React.FC = () => {
       }
     });
 
-    // Subscribe to auto-update status
+    // Subscribe to auto-update status, starting from wherever the updater already is
+    window.api
+      ?.getUpdateStatus?.()
+      .then(setUpdateStatus)
+      .catch(() => {});
     const unsubUpdate = window.api?.onUpdateStatus?.((status) => {
       setUpdateStatus(status);
       setIsCheckingUpdate(false);
@@ -703,6 +707,24 @@ export const App: React.FC = () => {
     }
   };
 
+  const handleInstallUpdate = async () => {
+    if (!window.api?.installUpdate) return;
+    const running = queue.filter((i) => i.status === 'downloading').length;
+    if (
+      running > 0 &&
+      !window.confirm(
+        `${running} ${running === 1 ? 'download is' : 'downloads are'} still running and will stop. Restart and update now?`
+      )
+    ) {
+      return;
+    }
+    try {
+      await window.api.installUpdate();
+    } catch (err) {
+      console.error('Install update failed:', err);
+    }
+  };
+
   const handleCheckUpdates = async () => {
     try {
       setIsCheckingUpdate(true);
@@ -722,6 +744,9 @@ export const App: React.FC = () => {
   ).length;
 
   const isFetchBusy = fetchState === 'loading' || fetchState === 'searching';
+  const isUpdateChecking = isCheckingUpdate || updateStatus.status === 'checking';
+  const isUpdateDownloading =
+    updateStatus.status === 'available' || updateStatus.status === 'downloading';
 
   const engineStatus =
     fetchState === 'loading'
@@ -776,6 +801,18 @@ export const App: React.FC = () => {
         </nav>
 
         <div className="topbar-status" id="app-system-status">
+          {updateStatus.status === 'downloaded' && (
+            <button
+              id="btn-topbar-restart-update"
+              type="button"
+              className="topbar-update"
+              onClick={handleInstallUpdate}
+              title={`Version ${updateStatus.version} is ready to install`}
+            >
+              <RefreshCw size={12} />
+              <span>Restart to Update</span>
+            </button>
+          )}
           <span
             className={`topbar-status-dot ${isFetchBusy || activeDownloadsCount > 0 ? 'busy' : ''}`}
           />
@@ -1458,24 +1495,58 @@ export const App: React.FC = () => {
                   <div className="setting-row">
                     <div className="setting-info">
                       <span className="setting-label">App updates</span>
-                      <span className="setting-desc">
-                        {updateStatus.status === 'available'
-                          ? `Version ${updateStatus.version} is available`
-                          : updateStatus.status === 'not-available'
-                            ? `Up to date (v${updateStatus.version || appInfo?.version})`
-                            : 'Checks GitHub Releases. yt-dlp updates on its own.'}
+                      <span className="setting-desc" id="update-status-text">
+                        {updateStatus.status === 'checking'
+                          ? 'Checking for updates…'
+                          : updateStatus.status === 'available'
+                            ? `Downloading version ${updateStatus.version}…`
+                            : updateStatus.status === 'downloading'
+                              ? `Downloading version ${updateStatus.version ?? ''}… ${Math.floor(updateStatus.percent ?? 0)}%`
+                              : updateStatus.status === 'downloaded'
+                                ? `Version ${updateStatus.version} is ready to install`
+                                : updateStatus.status === 'not-available'
+                                  ? `Up to date (v${updateStatus.version || appInfo?.version})`
+                                  : updateStatus.status === 'error'
+                                    ? "Couldn't check for updates. Try again later."
+                                    : 'Checks GitHub Releases. yt-dlp updates on its own.'}
                       </span>
+                      {isUpdateDownloading && (
+                        <div className="update-progress" aria-hidden="true">
+                          <div
+                            className="update-progress-fill"
+                            style={{ width: `${Math.floor(updateStatus.percent ?? 0)}%` }}
+                          />
+                        </div>
+                      )}
                     </div>
-                    <button
-                      id="btn-check-updates"
-                      type="button"
-                      className="glass-pill"
-                      onClick={handleCheckUpdates}
-                      disabled={isCheckingUpdate}
-                    >
-                      <RefreshCw size={13} className={isCheckingUpdate ? 'spin-icon' : ''} />
-                      <span>{isCheckingUpdate ? 'Checking' : 'Check now'}</span>
-                    </button>
+                    {updateStatus.status === 'downloaded' ? (
+                      <button
+                        id="btn-restart-update"
+                        type="button"
+                        className="white-pill update-restart-pill"
+                        onClick={handleInstallUpdate}
+                      >
+                        <RefreshCw size={13} />
+                        <span>Restart to Update</span>
+                      </button>
+                    ) : (
+                      <button
+                        id="btn-check-updates"
+                        type="button"
+                        className="glass-pill"
+                        onClick={handleCheckUpdates}
+                        disabled={isUpdateChecking || isUpdateDownloading}
+                      >
+                        <RefreshCw size={13} className={isUpdateChecking ? 'spin-icon' : ''} />
+                        <span>
+                          {isUpdateDownloading
+                            ? 'Downloading'
+                            : isUpdateChecking
+                              ? 'Checking'
+                              : 'Check now'}
+                        </span>
+                      </button>
+                    )}
                   </div>
 
                   <div className="setting-row">

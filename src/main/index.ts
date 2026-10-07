@@ -136,6 +136,16 @@ function setupIpcHandlers(): void {
     return await appUpdater.checkForUpdates();
   });
 
+  ipcMain.handle(IPC_CHANNELS.UPDATER_GET_STATUS, async () => {
+    return appUpdater.getStatus();
+  });
+
+  ipcMain.handle(IPC_CHANNELS.UPDATER_INSTALL, async () => {
+    if (appUpdater.getStatus().status !== 'downloaded') return false;
+    downloadManager.stopAllForUpdate();
+    return appUpdater.installAndRestart();
+  });
+
   ipcMain.handle(IPC_CHANNELS.STORE_GET_ONBOARDING, async () => {
     const s = queueManager.getSettings();
     return Boolean(s.hasCompletedOnboarding);
